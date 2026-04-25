@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BrainDance – EEG Emotion Music</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+
+    <div class="emotion-flash" id="flash"></div>
+    <div class="bg-orbs">
+        <div class="orb orb1" id="orb1"></div>
+        <div class="orb orb2" id="orb2"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <h1 id="appTitle">BRAINDANCE</h1>
+            <p>EEG-Powered Emotion Music System</p>
+        </header>
+
+        <div class="connect-banner">
+            <div class="connect-icon">🧠</div>
+            <div>
+                <strong>Cortex API</strong> — <span id="wsStatus">WebSocket not connected</span><br>
+                Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below to simulate EEG
+                input.
+            </div>
+            <button class="connect-btn" id="reconnectBtn">Connect EPOC X</button>
+        </div>
+
+        <div class="eeg-bar">
+            <div class="eeg-dot" id="eegDot"></div>
+            <span class="eeg-label">EEG Signal</span>
+            <span class="eeg-status" id="eegStatus">SIMULATED</span>
+        </div>
+
+        <!-- Bigger visualizer area with toggle -->
+        <div class="visualizer-wrap">
+            <div class="vis-control">
+                <button id="toggleVisBtn" class="vis-toggle-btn">Switch to Radial View</button>
+            </div>
+            <div class="vis-canvas-container">
+                <canvas id="visBar" height="300"></canvas>
+                <canvas id="visRadial" width="300" height="300"></canvas>
+            </div>
+        </div>
+
+        <div class="section-title">Brainwave Bands (μV²/Hz)</div>
+        <div class="waves-row">
+            <div class="wave-box">
+                <div class="wave-name">DELTA</div>
+                <div class="wave-val" id="wDelta">0.0</div>
+                <div class="wave-bar">
+                    <div class="wave-fill" id="wDeltaBar" style="width:0%;background:#7e57c2"></div>
+                </div>
+            </div>
+            <div class="wave-box">
+                <div class="wave-name">THETA</div>
+                <div class="wave-val" id="wTheta">0.0</div>
+                <div class="wave-bar">
+                    <div class="wave-fill" id="wThetaBar" style="width:0%;background:#4fc3f7"></div>
+                </div>
+            </div>
+            <div class="wave-box">
+                <div class="wave-name">ALPHA</div>
+                <div class="wave-val" id="wAlpha">0.0</div>
+                <div class="wave-bar">
+                    <div class="wave-fill" id="wAlphaBar" style="width:0%;background:#66bb6a"></div>
+                </div>
+            </div>
+            <div class="wave-box">
+                <div class="wave-name">BETA</div>
+                <div class="wave-val" id="wBeta">0.0</div>
+                <div class="wave-bar">
+                    <div class="wave-fill" id="wBetaBar" style="width:0%;background:#ffd54f"></div>
+                </div>
+            </div>
+            <div class="wave-box">
+                <div class="wave-name">GAMMA</div>
+                <div class="wave-val" id="wGamma">0.0</div>
+                <div class="wave-bar">
+                    <div class="wave-fill" id="wGammaBar" style="width:0%;background:#ef5350"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Centered emotion grid -->
+        <div class="section-title">Detected Emotion (Simulate EEG)</div>
+        <div class="emotions-grid" id="emotionGrid"></div>
+
+        <div class="intensity-row">
+            <div class="intensity-label"><span>Emotion Intensity</span><span id="intensityVal">50%</span></div>
+            <div class="intensity-track">
+                <div class="intensity-fill" id="intensityFill"></div>
+            </div>
+        </div>
+
+        <div class="player">
+            <div class="section-title">Now Playing</div>
+            <div class="now-playing">
+                <div class="album-art" id="albumArt">🎵</div>
+                <div class="track-info">
+                    <div class="track-name" id="trackName">Select an emotion</div>
+                    <div class="track-sub" id="trackSub">Music matched to emotion</div>
+                </div>
+                <div class="playing-tag" id="playingTag">READY</div>
+            </div>
+            <div class="controls">
+                <button class="ctrl-btn" id="prevBtn">⏮</button>
+                <button class="ctrl-btn" id="rewindBtn">⏪</button>
+                <button class="play-btn" id="playBtn">▶</button>
+                <button class="ctrl-btn" id="forwardBtn">⏩</button>
+                <button class="ctrl-btn" id="nextBtn">⏭</button>
+            </div>
+            <div class="progress-row">
+                <span class="time" id="timeElapsed">0:00</span>
+                <div class="progress-track">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <span class="time" id="timeDuration">0:00</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+
+</html>

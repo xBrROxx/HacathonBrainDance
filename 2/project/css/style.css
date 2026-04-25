@@ -1,0 +1,622 @@
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@300;400;500&display=swap');
+
+:root {
+    --bg: #060610;
+    --panel: rgba(255, 255, 255, 0.04);
+    --border: rgba(255, 255, 255, 0.08);
+    --current: #4fc3f7;
+    --glow: 0 0 30px var(--current);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: var(--bg);
+    color: #fff;
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+.bg-orbs {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(80px);
+    opacity: 0.15;
+    transition: background 1.5s ease;
+    animation: float 8s ease-in-out infinite;
+}
+
+.orb1 {
+    width: 400px;
+    height: 400px;
+    top: -100px;
+    left: -100px;
+    background: var(--current);
+}
+
+.orb2 {
+    width: 300px;
+    height: 300px;
+    bottom: 0;
+    right: -50px;
+    background: var(--current);
+    animation-delay: -4s;
+}
+
+@keyframes float {
+
+    0%,
+    100% {
+        transform: translateY(0px) scale(1);
+    }
+
+    50% {
+        transform: translateY(-30px) scale(1.05);
+    }
+}
+
+.container {
+    position: relative;
+    z-index: 1;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+header {
+    text-align: center;
+    padding: 30px 0 20px;
+}
+
+header h1 {
+    font-family: 'Orbitron', monospace;
+    font-size: clamp(1.8rem, 5vw, 3rem);
+    font-weight: 900;
+    letter-spacing: 4px;
+    color: var(--current);
+    text-shadow: var(--glow);
+    transition: color 1s, text-shadow 1s;
+}
+
+header p {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 0.85rem;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-top: 8px;
+}
+
+.eeg-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 20px;
+    margin-bottom: 20px;
+}
+
+.eeg-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--current);
+    box-shadow: 0 0 10px var(--current);
+    animation: pulse 1.5s ease-in-out infinite;
+    transition: background 1s, box-shadow 1s;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1)
+    }
+
+    50% {
+        opacity: 0.5;
+        transform: scale(0.8)
+    }
+}
+
+.eeg-label {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.5);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+}
+
+.eeg-status {
+    font-size: 0.85rem;
+    color: var(--current);
+    transition: color 1s;
+    margin-left: auto;
+}
+
+.vis-label {
+    position: absolute;
+    top: 12px;
+    left: 16px;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 3px;
+    color: rgba(255, 255, 255, 0.3);
+    text-transform: uppercase;
+}
+
+.section-title {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 3px;
+    color: rgba(255, 255, 255, 0.3);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}
+
+.emotion-btn {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 10px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.3s ease;
+    color: rgba(255, 255, 255, 0.6);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.8rem;
+}
+
+.emotion-btn:hover {
+    border-color: rgba(255, 255, 255, 0.2);
+    transform: translateY(-2px);
+}
+
+.emotion-btn.active {
+    border-color: var(--e-color);
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--e-color);
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.05), inset 0 0 20px rgba(255, 255, 255, 0.02);
+}
+
+.emotion-btn .emoji {
+    font-size: 1.8rem;
+    display: block;
+    margin-bottom: 6px;
+}
+
+.emotion-btn .name {
+    font-weight: 500;
+    display: block;
+}
+
+.emotion-btn .e-intensity {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.3);
+    margin-top: 4px;
+    display: none;
+}
+
+.emotion-btn.active .e-intensity {
+    display: block;
+    color: var(--e-color);
+}
+
+.intensity-row {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+}
+
+.intensity-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.4);
+    margin-bottom: 10px;
+}
+
+.intensity-track {
+    height: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.intensity-fill {
+    height: 100%;
+    width: 72%;
+    background: linear-gradient(90deg, var(--current), rgba(255, 255, 255, 0.8));
+    border-radius: 3px;
+    transition: width 1s ease, background 1s ease;
+    box-shadow: 0 0 10px var(--current);
+}
+
+.waves-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+.wave-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 8px;
+    text-align: center;
+}
+
+.wave-name {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 2px;
+    color: rgba(255, 255, 255, 0.3);
+    margin-bottom: 6px;
+}
+
+.wave-val {
+    font-size: 1rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.7);
+    transition: color 0.5s;
+}
+
+.wave-bar {
+    height: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
+    margin-top: 6px;
+    overflow: hidden;
+}
+
+.wave-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.8s ease;
+}
+
+.player {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.now-playing {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.album-art {
+    width: 60px;
+    height: 60px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.8rem;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+    transition: box-shadow 1s;
+    box-shadow: 0 0 20px var(--current);
+}
+
+.track-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.track-name {
+    font-weight: 600;
+    font-size: 1rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.track-sub {
+    font-size: 0.78rem;
+    color: rgba(255, 255, 255, 0.4);
+    margin-top: 3px;
+}
+
+.playing-tag {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 2px;
+    color: var(--current);
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border: 1px solid var(--current);
+    border-radius: 20px;
+    white-space: nowrap;
+    transition: color 1s, border-color 1s;
+}
+
+.controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+}
+
+.ctrl-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 1.2rem;
+    transition: color 0.2s, transform 0.2s;
+    padding: 8px;
+}
+
+.ctrl-btn:hover {
+    color: #fff;
+    transform: scale(1.1);
+}
+
+.play-btn {
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: var(--current);
+    border: none;
+    cursor: pointer;
+    font-size: 1.1rem;
+    color: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 1s, box-shadow 1s, transform 0.2s;
+    box-shadow: 0 0 20px var(--current);
+}
+
+.play-btn:hover {
+    transform: scale(1.08);
+}
+
+.progress-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.time {
+    font-size: 0.72rem;
+    color: rgba(255, 255, 255, 0.3);
+    width: 35px;
+    text-align: center;
+}
+
+.progress-track {
+    flex: 1;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--current), rgba(255, 255, 255, 0.9));
+    border-radius: 2px;
+    transition: background 1s;
+}
+
+.connect-banner {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px dashed rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 20px;
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.connect-icon {
+    font-size: 1.4rem;
+}
+
+.connect-btn {
+    margin-left: auto;
+    background: none;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.72rem;
+    letter-spacing: 1px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.connect-btn:hover {
+    border-color: var(--current);
+    color: var(--current);
+}
+
+.emotion-flash {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 999;
+    opacity: 0;
+    background: var(--current);
+    transition: opacity 0.2s;
+}
+
+/* Guide styles */
+.guide {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 20px;
+}
+
+.guide h2 {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.9rem;
+    letter-spacing: 3px;
+    color: var(--current);
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    transition: color 1s;
+}
+
+.step {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+.step-num {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.75rem;
+    color: var(--current);
+    transition: color 1s;
+}
+
+.step-body h3 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.step-body p {
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.45);
+    line-height: 1.6;
+}
+
+.step-body code {
+    display: block;
+    margin-top: 8px;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.72rem;
+    color: #a5d6a7;
+    font-family: 'Courier New', monospace;
+    white-space: pre;
+    overflow-x: auto;
+    line-height: 1.7;
+}
+
+/* Visualizer area bigger and toggle button */
+.visualizer-wrap {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+.vis-control {
+    margin-bottom: 15px;
+}
+
+.vis-toggle-btn {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: rgba(255, 255, 255, 0.7);
+    font-family: 'Orbitron', monospace;
+    font-size: 0.75rem;
+    letter-spacing: 1px;
+    padding: 8px 20px;
+    border-radius: 30px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.vis-toggle-btn:hover {
+    border-color: var(--current);
+    color: var(--current);
+}
+
+.vis-canvas-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 320px;
+}
+
+#visBar,
+#visRadial {
+    display: none;
+    /* hidden by default */
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 12px;
+}
+
+#visBar.active,
+#visRadial.active {
+    display: block;
+    /* shown when active */
+}
+
+#visBar {
+    width: 100%;
+    max-width: 800px;
+    height: 300px;
+}
+
+#visRadial {
+    width: 500px;
+    height: 500px;
+}
+
+/* Centered emotion grid */
+.emotions-grid {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 25px;
+}
+
+.emotion-btn {
+    flex: 0 0 auto;
+    min-width: 100px;
+}
