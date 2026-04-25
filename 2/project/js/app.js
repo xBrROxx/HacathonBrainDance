@@ -1,6 +1,10 @@
 document.addEventListener('DOMContentLoaded', () => {
     // ================= CONFIGURATION =================
     const API_BASE_URL = '/api/songs';
+    const EEG_WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname || 'localhost'}:8765`;
+    const WS_RECONNECT_DELAY_MS = 2000;
+    const REAL_EMOTION_MIN_CONFIDENCE = 0.6;
+    const REAL_EMOTION_COOLDOWN_MS = 10000;
 
     const EMOTION_PRESETS = {
         calm: { color: '#4fc3f7', waves: { delta: 12, theta: 35, alpha: 80, beta: 20, gamma: 8 }, intensity: 65, visStyle: 'smooth' },
@@ -9,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sad: { color: '#7e57c2', waves: { delta: 20, theta: 45, alpha: 25, beta: 30, gamma: 10 }, intensity: 58, visStyle: 'slow' },
         focused: { color: '#66bb6a', waves: { delta: 4, theta: 20, alpha: 65, beta: 55, gamma: 30 }, intensity: 75, visStyle: 'steady' }
     };
+    const SUPPORTED_EMOTIONS = Object.keys(EMOTION_PRESETS);
 
     let songCache = { calm: [], happy: [], angry: [], sad: [], focused: [] };
 
@@ -41,6 +46,10 @@ document.addEventListener('DOMContentLoaded', () => {
         return map[emotion] || '🎵';
     }
 
+    function isSupportedEmotion(emotion) {
+        return SUPPORTED_EMOTIONS.includes(emotion);
+    }
+
     // ================= DOM ELEMENTS =================
     const flash = document.getElementById('flash');
     const root = document.documentElement;
@@ -64,6 +73,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const forwardBtn = document.getElementById('forwardBtn');
     const reconnectBtn = document.getElementById('reconnectBtn');
     const wsStatusSpan = document.getElementById('wsStatus');
+    const modeNote = document.getElementById('modeNote');
     const toggleBtn = document.getElementById('toggleVisBtn');
 
     // Visualizer canvases
@@ -85,6 +95,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let animationId = null;
     let progressInterval = null;
     let simPhase = 0;
+    let emotionSocket = null;
+    let reconnectTimer = null;
+    let socketConnected = false;
+    let autoSwitchLockedUntil = 0;
 
     // ================= VISUALIZER TOGGLE & SIZING =================
     function setVisualizerMode(mode) {
@@ -482,6 +496,215 @@ document.addEventListener('DOMContentLoaded', () => {
         return `${Math.floor(sec / 60)}:${(sec % 60).toString().padStart(2, '0')}`;
     }
 
+    function setConnectionState(statusText, modeHtml, eegLabel) {
+        if (wsStatusSpan && statusText) wsStatusSpan.textContent = statusText;
+        if (modeNote && modeHtml) modeNote.innerHTML = modeHtml;
+        if (eegStatus && eegLabel) eegStatus.textContent = eegLabel;
+    }
+
+    function setIntensityFromConfidence(confidence) {
+        if (typeof confidence !== 'number' || Number.isNaN(confidence)) return;
+        const percent = Math.round(Math.max(0, Math.min(1, confidence)) * 100);
+        intensityVal.textContent = percent + '%';
+        intensityFill.style.width = percent + '%';
+    }
+
+    function applyRealtimeFeatures(features, emotion) {
+        if (!features) return;
+        const preset = EMOTION_PRESETS[emotion];
+        if (!preset) return;
+        const toPercent = value => {
+            if (typeof value !== 'number' || Number.isNaN(value)) return null;
+            return Math.max(0, Math.min(100, Math.round(value * 100)));
+        };
+        const theta = toPercent(features.theta);
+        const alpha = toPercent(features.alpha);
+        const beta = toPercent(features.beta);
+        const gamma = toPercent(features.gamma);
+        animateBrainwaves({
+            delta: preset.waves.delta,
+            theta: theta === null ? preset.waves.theta : theta,
+            alpha: alpha === null ? preset.waves.alpha : alpha,
+            beta: beta === null ? preset.waves.beta : beta,
+            gamma: gamma === null ? preset.waves.gamma : gamma
+        });
+    }
+
+    async function ensureSongsForEmotion(emotion) {
+        if (!isSupportedEmotion(emotion)) return [];
+        if (songCache[emotion] && songCache[emotion].length > 0) return songCache[emotion];
+        return fetchSongsForEmotion(emotion);
+    }
+
+    async function applyEmotionSelection(emotion, { source = 'manual', confidence = null, features = null } = {}) {
+        if (!isSupportedEmotion(emotion)) return false;
+
+        // Both manual clicks and live EEG route through the same guard so the
+        // UI never switches to a mood that has no playable tracks.
+        const songs = await ensureSongsForEmotion(emotion);
+        if (!songs || songs.length === 0) {
+            console.warn(`No songs found for emotion: ${emotion}`);
+            if (source === 'eeg') {
+                setConnectionState(
+                    'Emotion stream connected',
+                    `Live EEG connected, but there are no tracks for <span style="color:#ffd54f">${emotion}</span>. Staying on the current mood.`,
+                    socketConnected ? 'LIVE' : 'SIMULATED'
+                );
+            } else {
+                setConnectionState(
+                    wsStatusSpan ? wsStatusSpan.textContent : 'WebSocket not connected',
+                    `No tracks found for <span style="color:#ffd54f">${emotion}</span>. Current mood unchanged.`,
+                    socketConnected ? eegStatus.textContent : 'SIMULATED'
+                );
+            }
+            return false;
+        }
+
+        const isRealtime = source === 'eeg';
+        const now = Date.now();
+
+        if (isRealtime) {
+            // The backend smooths predictions already; this adds one more client
+            // side guard so the demo doesn't thrash songs on noisy updates.
+            if (typeof confidence === 'number' && confidence < REAL_EMOTION_MIN_CONFIDENCE) {
+                return false;
+            }
+            if (emotion !== currentEmotion && now < autoSwitchLockedUntil) {
+                return false;
+            }
+            if (emotion === currentEmotion && currentTrackFile) {
+                updateEmotionUI(emotion);
+                applyRealtimeFeatures(features, emotion);
+                setIntensityFromConfidence(confidence);
+                setConnectionState(
+                    `Live emotion: ${emotion}${typeof confidence === 'number' ? ` (${Math.round(confidence * 100)}%)` : ''}`,
+                    'Live EEG mode is active. Music follows the detected emotion when the signal is stable.',
+                    'LIVE'
+                );
+                return true;
+            }
+        }
+
+        currentEmotion = emotion;
+        setCurrentSong(emotion);
+        updateEmotionUI(emotion);
+        applyRealtimeFeatures(features, emotion);
+        setIntensityFromConfidence(confidence);
+        playCurrentSong();
+
+        if (isRealtime) {
+            autoSwitchLockedUntil = now + REAL_EMOTION_COOLDOWN_MS;
+            setConnectionState(
+                `Live emotion: ${emotion}${typeof confidence === 'number' ? ` (${Math.round(confidence * 100)}%)` : ''}`,
+                'Live EEG mode is active. Music follows the detected emotion when the signal is stable.',
+                'LIVE'
+            );
+        }
+
+        return true;
+    }
+
+    async function handleDetectedEmotion(emotion, confidence, source = 'eeg', features = null) {
+        const normalizedEmotion = typeof emotion === 'string' ? emotion.toLowerCase() : '';
+        if (!isSupportedEmotion(normalizedEmotion)) return false;
+        return applyEmotionSelection(normalizedEmotion, { source, confidence, features });
+    }
+
+    function handleSocketStatusMessage(data) {
+        if (!data || data.type !== 'status') return;
+        if (data.status === 'calibrating') {
+            const percent = Math.round((data.progress || 0) * 100);
+            setConnectionState(
+                'Emotion stream connected',
+                `Live EEG connected. Calibrating the baseline... ${percent}%`,
+                'CALIBRATING'
+            );
+        }
+    }
+
+    function scheduleReconnect() {
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connectEmotionSocket();
+        }, WS_RECONNECT_DELAY_MS);
+    }
+
+    function connectEmotionSocket(forceReconnect = false) {
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+
+        if (emotionSocket && (emotionSocket.readyState === WebSocket.OPEN || emotionSocket.readyState === WebSocket.CONNECTING)) {
+            if (!forceReconnect) return;
+            emotionSocket.onclose = null;
+            emotionSocket.close();
+            emotionSocket = null;
+            socketConnected = false;
+        }
+
+        setConnectionState(
+            'Connecting...',
+            'Trying to connect to the live EEG emotion stream...',
+            'CONNECTING'
+        );
+
+        // The frontend only consumes final emotion/status events; raw EEG stays
+        // on the backend so the browser logic remains simple and resilient.
+        emotionSocket = new WebSocket(EEG_WS_URL);
+
+        emotionSocket.onopen = () => {
+            socketConnected = true;
+            setConnectionState(
+                'Emotion stream connected',
+                'Live EEG connected. Waiting for calibration or stable emotion output...',
+                'LIVE'
+            );
+        };
+
+        emotionSocket.onmessage = async (event) => {
+            let data;
+            try {
+                data = JSON.parse(event.data);
+            } catch (error) {
+                console.warn('Ignoring malformed WebSocket message:', error);
+                return;
+            }
+
+            if (!data || typeof data !== 'object') return;
+            if (data.type === 'status') {
+                handleSocketStatusMessage(data);
+                return;
+            }
+            if (data.type && data.type !== 'emotion') return;
+
+            const confidence = typeof data.confidence === 'number' ? data.confidence : null;
+            await handleDetectedEmotion(data.emotion, confidence, 'eeg', data.features || null);
+        };
+
+        emotionSocket.onerror = () => {
+            if (!socketConnected) {
+                setConnectionState(
+                    'Emotion stream error',
+                    'Falling back to simulation mode until the stream returns.',
+                    'SIMULATED'
+                );
+            }
+        };
+
+        emotionSocket.onclose = () => {
+            emotionSocket = null;
+            socketConnected = false;
+            setConnectionState(
+                'WebSocket not connected',
+                'Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below to simulate EEG input.',
+                'SIMULATED'
+            );
+            scheduleReconnect();
+        };
+    }
+
     // ================= UI UPDATES ==========================================
     function updateEmotionUI(emotion) {
         const preset = EMOTION_PRESETS[emotion];
@@ -522,11 +745,7 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.style.setProperty('--e-color', EMOTION_PRESETS[em].color);
             btn.innerHTML = `<span class="emoji">${emojiMap[em]}</span><span class="name">${em.charAt(0).toUpperCase() + em.slice(1)}</span>`;
             btn.addEventListener('click', async () => {
-                if (songCache[em].length === 0) await fetchSongsForEmotion(em);
-                currentEmotion = em;
-                setCurrentSong(em);
-                playCurrentSong();
-                updateEmotionUI(em);
+                await applyEmotionSelection(em, { source: 'manual' });
             });
             emotionGrid.appendChild(btn);
         });
@@ -536,13 +755,18 @@ document.addEventListener('DOMContentLoaded', () => {
     async function init() {
         initAudio();
         buildEmotionGrid();
+        setConnectionState(
+            'WebSocket not connected',
+            'Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below to simulate EEG input.',
+            'SIMULATED'
+        );
 
         playBtn.addEventListener('click', togglePlay);
         nextBtn.addEventListener('click', nextTrack);
         prevBtn.addEventListener('click', prevTrack);
         if (rewindBtn) rewindBtn.addEventListener('click', () => { if (audioElement) audioElement.currentTime -= 10; });
         if (forwardBtn) forwardBtn.addEventListener('click', () => { if (audioElement) audioElement.currentTime += 10; });
-        if (reconnectBtn) reconnectBtn.addEventListener('click', () => { wsStatusSpan.textContent = 'Reconnecting...'; });
+        if (reconnectBtn) reconnectBtn.addEventListener('click', () => connectEmotionSocket(true));
 
         if (toggleBtn) {
             toggleBtn.addEventListener('click', () => {
@@ -561,6 +785,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         setVisualizerMode('bar');
         startVisualizerLoop();
+        connectEmotionSocket();
     }
 
     init();

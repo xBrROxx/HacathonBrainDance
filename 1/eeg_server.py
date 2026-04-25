@@ -1,3 +1,4 @@
+import os
 import asyncio
 import websockets
 import json
@@ -8,28 +9,66 @@ from scipy.signal import butter, lfilter, iirnotch
 import websocket as ws_client
 from scipy.signal import butter, filtfilt, iirnotch
 
+try:
+    from emotion_inference import EmotionInferenceEngine, MissingArtifactsError
+except Exception as exc:
+    # Keep the EEG relay usable even when model dependencies/artifacts aren't installed.
+    EmotionInferenceEngine = None
+    MissingArtifactsError = RuntimeError
+    EMOTION_INFERENCE_IMPORT_ERROR = exc
+else:
+    EMOTION_INFERENCE_IMPORT_ERROR = None
+
 # ================= CONFIG =================
-CLIENT_ID = "braindance"
-CLIENT_SECRET = "w0gT6A9v8NOLpHO8usSYwly2Kan5UdaPmy3RzQCzhDLhVyI1AoXWwusb4Oh2LRQ6BTaQCIU5ywqQA5PBHtHtPoQQXOI3KF4WSYCM44ZD6Di3UFjVWhIAKcjCZkCiZYqO"
-CORTEX_URL = "wss://localhost:6868"
-WS_SERVER_PORT = 8765
+CLIENT_ID = os.getenv("CORTEX_CLIENT_ID", "braindance")
+CLIENT_SECRET = os.getenv("CORTEX_CLIENT_SECRET")
+CORTEX_URL = os.getenv("CORTEX_URL", "wss://localhost:6868")
+WS_SERVER_HOST = os.getenv("EEG_WS_HOST", "127.0.0.1")
+WS_SERVER_PORT = int(os.getenv("EEG_WS_PORT", "8765"))
 
 FS = 128
 WINDOW_SIZE = 256
 OVERLAP = 128
+POWERLINE_HZ = float(os.getenv("EEG_POWERLINE_HZ", "50"))
+MODEL_CHANNELS = [
+    "AF3", "F7", "F3", "FC5", "T7", "P7", "O1",
+    "O2", "P8", "T8", "FC6", "F4", "F8", "AF4",
+]
 
 # ================= GLOBAL STATE =================
 clients = set()
 buffer = []
 session_id = None
 auth_token = None
+eeg_columns = None
+eeg_channel_indices = None
+
+
+def create_emotion_engine():
+    if EmotionInferenceEngine is None:
+        print(f"[WARN] Emotion inference unavailable: {EMOTION_INFERENCE_IMPORT_ERROR}")
+        return None
+
+    try:
+        # The model path is optional at startup; we fall back to EEG-only streaming if missing.
+        engine = EmotionInferenceEngine()
+        print("[MODEL] Emotion inference ready")
+        return engine
+    except MissingArtifactsError as exc:
+        print(f"[WARN] Emotion inference disabled: {exc}")
+    except Exception as exc:
+        print(f"[WARN] Failed to initialize emotion inference: {exc}")
+    return None
+
+
+emotion_engine = create_emotion_engine()
 
 # ================= FILTERS =================
 def bandpass(data, low=0.5, high=45, fs=128):
     b, a = butter(4, [low/(fs/2), high/(fs/2)], btype='band')
     return filtfilt(b, a, data, axis=0)  # zero-phase
 
-def notch(data, freq=50, fs=128):
+def notch(data, freq=POWERLINE_HZ, fs=128):
     b, a = iirnotch(freq/(fs/2), Q=30)
     return filtfilt(b, a, data, axis=0)
 
@@ -112,7 +151,7 @@ async def handler(websocket):
     try:
         await websocket.wait_closed()
     finally:
-        clients.remove(websocket)
+        clients.discard(websocket)
         print("Client disconnected")
 
 async def broadcast(message):
@@ -125,7 +164,74 @@ async def broadcast(message):
         except:
             dead.append(c)
     for d in dead:
-        clients.remove(d)
+        clients.discard(d)
+
+
+def broadcast_payload(payload, loop):
+    asyncio.run_coroutine_threadsafe(
+        broadcast(json.dumps(payload)), loop
+    )
+
+
+def set_eeg_columns(cols):
+    global eeg_columns, eeg_channel_indices
+
+    if not isinstance(cols, list) or not cols:
+        return
+
+    eeg_columns = cols
+    if all(name in cols for name in MODEL_CHANNELS):
+        # Build the exact channel remap the notebook-trained model expects.
+        eeg_channel_indices = [cols.index(name) for name in MODEL_CHANNELS]
+        print(f"[MODEL] Using Cortex channel mapping: {MODEL_CHANNELS}")
+    else:
+        missing = [name for name in MODEL_CHANNELS if name not in cols]
+        eeg_channel_indices = None
+        print(f"[WARN] Missing expected EEG channels for model mapping: {missing}")
+
+
+def maybe_extract_eeg_columns(message):
+    if not isinstance(message, dict):
+        return
+
+    # Cortex can expose EEG labels either in the first stream payload or in
+    # the subscribe response, depending on the SDK/version.
+    eeg_payload = message.get("eeg")
+    if isinstance(eeg_payload, dict) and isinstance(eeg_payload.get("cols"), list):
+        set_eeg_columns(eeg_payload["cols"])
+        return
+
+    result = message.get("result")
+    if isinstance(result, dict):
+        success = result.get("success")
+        if isinstance(success, list):
+            for item in success:
+                if item.get("streamName") == "eeg" and isinstance(item.get("cols"), list):
+                    set_eeg_columns(item["cols"])
+                    return
+
+
+def extract_model_sample(eeg):
+    if not isinstance(eeg, list):
+        return None
+
+    try:
+        if eeg_channel_indices:
+            return [float(eeg[index]) for index in eeg_channel_indices]
+
+        # Cortex commonly prefixes counter/interpolation columns before the
+        # 14 Emotiv channels. Use explicit labels when available; this is only
+        # a fallback for local hackathon demos.
+        if len(eeg) >= 16:
+            return [float(value) for value in eeg[2:16]]
+        if len(eeg) >= 15:
+            return [float(value) for value in eeg[1:15]]
+        if len(eeg) == 14:
+            return [float(value) for value in eeg[:14]]
+    except (TypeError, ValueError, IndexError):
+        return None
+
+    return None
 
 # ================= BUFFER =================
 def handle_eeg(eeg, loop):
@@ -138,21 +244,41 @@ def handle_eeg(eeg, loop):
     sample = eeg[1:]  # remove timestamp
     buffer.append(sample)
 
+    if emotion_engine is not None:
+        model_sample = extract_model_sample(eeg)
+        if model_sample is not None:
+            try:
+                # Feed the inference buffer sample-by-sample while keeping the
+                # existing processed-window stream untouched for other clients.
+                emotion_engine.push_sample(model_sample)
+            except Exception as exc:
+                print(f"[WARN] Emotion sample rejected: {exc}")
+
     if len(buffer) >= WINDOW_SIZE:
         window = np.array(buffer[:WINDOW_SIZE])
         del buffer[:OVERLAP]
+        timestamp = time.time()
 
         clean = preprocess(window)
 
         if clean is not None:
-            message = json.dumps({
-                "timestamp": time.time(),
+            broadcast_payload({
+                "type": "eeg_window",
+                "timestamp": timestamp,
                 "data": clean.tolist()
-            })
+            }, loop)
 
-            asyncio.run_coroutine_threadsafe(
-                broadcast(message), loop
-            )
+        if emotion_engine is not None:
+            try:
+                # Emotion messages are emitted on the same socket, but typed so
+                # old EEG-window consumers can ignore them safely.
+                emotion_message = emotion_engine.predict(timestamp=timestamp)
+            except Exception as exc:
+                print(f"[WARN] Emotion inference failed: {exc}")
+                emotion_message = None
+
+            if emotion_message is not None:
+                broadcast_payload(emotion_message, loop)
 
 # ================= CORTEX CLIENT =================
 def start_cortex(loop):
@@ -176,6 +302,7 @@ def start_cortex(loop):
         global session_id, auth_token
 
         data = json.loads(message)
+        maybe_extract_eeg_columns(data)
 
         # AUTH RESPONSE
         if "result" in data and "cortexToken" in data["result"]:
@@ -216,7 +343,9 @@ def start_cortex(loop):
 
         # EEG DATA
         elif "eeg" in data:
-            handle_eeg(data["eeg"], loop)
+            eeg_payload = data["eeg"]
+            if isinstance(eeg_payload, list):
+                handle_eeg(eeg_payload, loop)
 
     def on_open(ws):
         print("Connected to Cortex")
@@ -238,14 +367,17 @@ def start_cortex(loop):
 async def main():
     loop = asyncio.get_running_loop()
 
-    threading.Thread(
-        target=start_cortex,
-        args=(loop,),
-        daemon=True
-    ).start()
+    if CLIENT_SECRET:
+        threading.Thread(
+            target=start_cortex,
+            args=(loop,),
+            daemon=True
+        ).start()
+    else:
+        print("[WARN] CORTEX_CLIENT_SECRET not set; EEG ingestion disabled")
 
-    async with websockets.serve(handler, "0.0.0.0", WS_SERVER_PORT):
-        print(f"Server running on ws://localhost:{WS_SERVER_PORT}")
+    async with websockets.serve(handler, WS_SERVER_HOST, WS_SERVER_PORT):
+        print(f"Server running on ws://{WS_SERVER_HOST}:{WS_SERVER_PORT}")
         await asyncio.Future()
 
 if __name__ == "__main__":

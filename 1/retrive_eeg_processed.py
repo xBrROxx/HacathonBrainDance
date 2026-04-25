@@ -1,6 +1,7 @@
 import asyncio
 import websockets
 import json
+import numpy as np
 
 async def listen():
     uri = "ws://localhost:8765"
@@ -9,6 +10,8 @@ async def listen():
         while True:
             msg = await websocket.recv()
             data = json.loads(msg)
+            if data.get("type") != "eeg_window":
+                continue
             print(f"t={data['timestamp']:.2f}, data shape={np.array(data['data']).shape}")
 
 asyncio.run(listen())
