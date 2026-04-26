@@ -405,12 +405,12 @@ class EmotionSmoother:
 
     def __init__(
         self,
-        min_confidence=0.62,
+        min_confidence=0.56,
         history_size=5,
-        min_stable_votes=3,
-        cooldown_seconds=10.0,
+        min_stable_votes=2,
+        cooldown_seconds=4.0,
         duplicate_silence_seconds=3.0,
-        ewma_alpha=0.2,
+        ewma_alpha=0.3,
         enter_high=THRESHOLD_HIGH,
         enter_low=THRESHOLD_LOW,
         dead_zone=DEAD_ZONE,
@@ -574,9 +574,9 @@ class EmotionSmoother:
 
         focus_ratio = beta / (alpha + theta + 1e-6)
         is_focused  = (
-            valence_prob >= 0.45        # not strongly negative
-            and focus_ratio >= 0.34
-            and beta >= theta * 0.9
+            valence_prob >= 0.55        # require clearly non-negative valence
+            and focus_ratio >= 0.5
+            and beta >= theta * 1.1
         )
 
         # Confidence: distance of both probs from 0.5, averaged

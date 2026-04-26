@@ -15,6 +15,7 @@ eeg/*.jsonl
 
 # Environment variables
 .env
+**/.env
 
 eeg/emotion_predictions.jsonl
 # OS

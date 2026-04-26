@@ -136,12 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
             <div style="margin-top:12px; display:flex; align-items:center; gap:8px;">
                 <span style="font-size:11px; color:rgba(255,255,255,0.4); text-transform:uppercase; letter-spacing:1px;">Confidence</span>
-                <div style="flex:1; background:rgba(255,255,255,0.08); border-radius:4px; height:6px; overflow:hidden;">
-                    <div id="liveConfBar" style="height:100%; width:0%; border-radius:4px;
-                        background: linear-gradient(90deg,#ef5350,#ffd54f,#66bb6a);
-                        transition:width 0.6s ease;"></div>
-                </div>
-                <span id="liveConfPct" style="font-size:12px; font-weight:bold; color:#fff; min-width:36px; text-align:right;">—</span>
+                <span id="liveConfPct" style="font-size:12px; font-weight:bold; color:#fff;">—</span>
             </div>
 
             <div style="margin-top:14px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.07);">
@@ -176,14 +171,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const confPct = Math.round((confidence || 0) * 100);
         const confBadge = document.getElementById('liveConfBadge');
-        const confBar = document.getElementById('liveConfBar');
         const confPctEl = document.getElementById('liveConfPct');
         if (confBadge) {
             confBadge.textContent = `CONF ${confPct}%`;
             confBadge.style.background = color + '33';
             confBadge.style.color = color;
         }
-        if (confBar) confBar.style.width = confPct + '%';
         if (confPctEl) confPctEl.textContent = confPct + '%';
 
         updateHistoryDots();
