@@ -1,25 +1,28 @@
 """
-eeg_server.py  —  EEG acquisition, preprocessing & WebSocket broadcast server
-==============================================================================
-Connects to the Emotiv Cortex SDK (wss://localhost:6868), preprocesses each
-256-sample window, and rebroadcasts the clean data on ws://localhost:8765.
+eeg_server.py — EEG acquisition, preprocessing, emotion inference, and WebSocket broadcast
+==========================================================================================
 
-Preprocessing chain (matches the DEAP/notebook pipeline exactly):
-  1. DC offset removal
-  2. Bandpass  0.5 – 45 Hz  (4th-order Butterworth, zero-phase)
-  3. Notch     50 Hz  (power-line, Q=30)
-  4. Notch     60 Hz  (US power-line, Q=30)  ← harmonic guard
-  5. EOG / blink rejection  (threshold on Fp/AF channels)
-  6. EMG / jaw clamp        (threshold on temporal channels T7, T8)
-  7. Average re-reference
-  8. Amplitude clip  ±100 µV
-  9. Z-score normalisation
- 10. Smoothing  (5-sample moving average)
- 11. Final NaN/Inf guard
+Pipeline:
+  1. EEG source (Cortex WebSocket OR LSL)
+  2. Per-window preprocessing (filter, reject artifacts, normalize)
+  3. Emotion inference (XGBoost valence → 5-way emotion mapping)
+  4. WebSocket broadcast (separate "eeg_window" and "emotion" message types)
+  5. Optional JSONL recording for audit/reprocessing
 
-Author: your-project
+Environment variables:
+  CORTEX_CLIENT_ID           — Emotiv Cortex client ID
+  CORTEX_CLIENT_SECRET       — Emotiv Cortex client secret
+  CORTEX_URL                 — Emotiv Cortex WebSocket endpoint (default: wss://localhost:6868)
+  USE_LSL                    — If set, read from EmotivPRO LSL stream instead of Cortex WebSocket
+  EEG_WS_HOST                — WebSocket server host (default: 127.0.0.1)
+  EEG_WS_PORT                — WebSocket server port (default: 8765)
+  EEG_POWERLINE_HZ           — Powerline frequency for notch filter (default: 50)
+  EEG_EMOTION_ARTIFACT_DIR   — Path to valence_xgb.joblib & scaler.joblib (auto-detected)
+  RECORD_PREDICTIONS         — If set, write emotion messages to JSONL file
+  RECORD_PREPROCESSED       — If set, write preprocessed windows to JSONL file
 """
 
+import os
 import asyncio
 import websockets
 import json
@@ -28,260 +31,284 @@ import time
 import numpy as np
 from scipy.signal import butter, filtfilt, iirnotch
 import websocket as ws_client
+import dotenv
 
-# ─────────────────────────── CONFIG ───────────────────────────
-CLIENT_ID     = "com.alumni_neuro.BrainDance"
-CLIENT_SECRET = (
-    "BgvspaFB7Ab5hWVjg6PpVoT5p7EELLj72Wm5obI9MLt7LhUVMoib8yBsVd7Idhlth33w2oJrMXCS1gD2z9egPaUeneCCdHbLtUG6aVlX6Shhgli0FJjdPaxFSOca2zUw"
-)
-CORTEX_URL    = "wss://localhost:6868"
-WS_SERVER_PORT = 8765
 
-FS            = 128    # Emotiv EPOC X sampling rate (Hz)  ← MUST match model
-WINDOW_SIZE   = 256    # samples per processing window  (2 s @ 128 Hz)
-OVERLAP       = 128    # samples to discard after each window (50 % overlap)
+try:
+    from emotion_inference import EmotionInferenceEngine, MissingArtifactsError
+except Exception as exc:
+    EmotionInferenceEngine = None
+    MissingArtifactsError = RuntimeError
+    EMOTION_INFERENCE_IMPORT_ERROR = exc
+else:
+    EMOTION_INFERENCE_IMPORT_ERROR = None
 
-# Emotiv EPOC X channel order — MUST match training order in the notebook
-CHANNELS = ['AF3', 'F7', 'F3', 'FC5', 'T7', 'P7', 'O1',
-            'O2', 'P8', 'T8', 'FC6', 'F4', 'F8', 'AF4']
+try:
+    import pylsl
+    HAS_LSL = True
+except ImportError:
+    HAS_LSL = False
 
-# Frontal / near-eye channels → blink & eye-movement artefacts (EOG)
-# Higher index = the column index inside a (samples × 14) window matrix
-EOG_CHANNEL_INDICES = [
-    CHANNELS.index(c) for c in ['AF3', 'AF4', 'F7', 'F8']
+# ═══════════════════════════════════════════════════════════════════════════
+#  CONFIG
+# ═══════════════════════════════════════════════════════════════════════════
+from dotenv import load_dotenv
+load_dotenv()
+CLIENT_ID           = os.getenv("CORTEX_CLIENT_ID", "braindance")
+CLIENT_SECRET       = os.getenv("CORTEX_CLIENT_SECRET")
+CORTEX_URL          = os.getenv("CORTEX_URL", "wss://localhost:6868")
+USE_LSL             = bool(os.getenv("USE_LSL"))
+WS_SERVER_HOST      = os.getenv("EEG_WS_HOST", "127.0.0.1")
+WS_SERVER_PORT      = int(os.getenv("EEG_WS_PORT", "8765"))
+
+FS                  = 128
+WINDOW_SIZE         = 256
+OVERLAP             = 128
+POWERLINE_HZ        = float(os.getenv("EEG_POWERLINE_HZ", "50"))
+
+MODEL_CHANNELS = [
+    "AF3", "F7", "F3", "FC5", "T7", "P7", "O1",
+    "O2", "P8", "T8", "FC6", "F4", "F8", "AF4",
 ]
-# Temporal channels → jaw-clench / muscle artefacts (EMG)
-EMG_CHANNEL_INDICES = [
-    CHANNELS.index(c) for c in ['T7', 'T8']
-]
 
-# ─────────────────────────── GLOBAL STATE ─────────────────────
-clients    = set()
-buffer     = []
-session_id = None
-auth_token = None
+# EOG channels (blink detection)
+EOG_CHANNELS = ["AF3", "AF4", "F7", "F8"]
+EMG_CHANNELS = ["T7", "T8"]
+
+# Record options
+RECORD_PREDICTIONS  = os.getenv("RECORD_PREDICTIONS")
+RECORD_PREPROCESSED = os.getenv("RECORD_PREPROCESSED")
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  GLOBAL STATE
+# ═══════════════════════════════════════════════════════════════════════════
+
+clients             = set()
+buffer              = []
+session_id          = None
+auth_token          = None
+eeg_columns         = None
+eeg_channel_indices = None
+emotion_engine      = None
+
+# Recording file handles
+prediction_file     = None
+preprocessed_file   = None
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  FILE RECORDING
+# ═══════════════════════════════════════════════════════════════════════════
+
+def init_recording():
+    global prediction_file, preprocessed_file
+
+    if RECORD_PREDICTIONS:
+        prediction_file = open("emotion_predictions.jsonl", "a", buffering=1)
+        print(f"[RECORD] Emotions → emotion_predictions.jsonl")
+
+    if RECORD_PREPROCESSED:
+        preprocessed_file = open("eeg_preprocessed.jsonl", "a", buffering=1)
+        print(f"[RECORD] Windows → eeg_preprocessed.jsonl")
 
 
-# ══════════════════════════════════════════════════════════════
-#  FILTER HELPERS
-#  All filters use filtfilt (zero-phase) to avoid phase distortion,
-#  matching scipy.signal.filtfilt calls in the notebook's feature
-#  extraction cell (compute_features / extract_band_power).
-# ══════════════════════════════════════════════════════════════
+def record_emotion(msg):
+    if prediction_file and msg:
+        prediction_file.write(json.dumps(msg) + "\n")
 
-def _bandpass_filter(data: np.ndarray,
-                     low: float = 0.5,
-                     high: float = 45.0,
-                     fs: int = 128) -> np.ndarray:
-    """4th-order zero-phase Butterworth bandpass (matches notebook butter(4,...))."""
+
+def record_preprocessed(msg):
+    if preprocessed_file and msg:
+        preprocessed_file.write(json.dumps(msg) + "\n")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  EMOTION ENGINE INIT
+# ═══════════════════════════════════════════════════════════════════════════
+
+def create_emotion_engine():
+    if EmotionInferenceEngine is None:
+        print(f"[WARN] Emotion inference unavailable: {EMOTION_INFERENCE_IMPORT_ERROR}")
+        return None
+
+    try:
+        engine = EmotionInferenceEngine()
+        print("[MODEL] Emotion inference ready")
+        return engine
+    except MissingArtifactsError as exc:
+        print(f"[WARN] Emotion inference disabled: {exc}")
+    except Exception as exc:
+        print(f"[WARN] Failed to initialize emotion inference: {exc}")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SIGNAL PROCESSING FILTERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _bandpass_filter(data, low=0.5, high=45.0, fs=128):
+    """4th-order zero-phase Butterworth bandpass."""
     nyq = fs / 2.0
     b, a = butter(4, [low / nyq, high / nyq], btype='band')
     return filtfilt(b, a, data, axis=0)
 
 
-def _notch_filter(data: np.ndarray,
-                  freq: float,
-                  fs: int = 128,
-                  Q: float = 30.0) -> np.ndarray:
-    """Zero-phase IIR notch at `freq` Hz (matches notebook iirnotch usage)."""
+def _notch_filter(data, freq=POWERLINE_HZ, fs=128, Q=30.0):
+    """Zero-phase IIR notch filter."""
     b, a = iirnotch(freq / (fs / 2.0), Q)
     return filtfilt(b, a, data, axis=0)
 
 
-def _remove_dc(data: np.ndarray) -> np.ndarray:
-    """Subtract per-channel mean (removes DC / slow drift)."""
+def _remove_dc(data):
+    """Subtract per-channel mean."""
     return data - np.mean(data, axis=0)
 
 
-def _average_rereference(data: np.ndarray) -> np.ndarray:
-    """Subtract common average reference across channels per time-point."""
-    mean = np.mean(data, axis=1, keepdims=True)  # shape (samples, 1)
+def _average_rereference(data):
+    """Subtract common average reference."""
+    mean = np.mean(data, axis=1, keepdims=True)
     return data - mean
 
 
-def _clip_artifacts(data: np.ndarray,
-                    threshold: float = 100.0) -> np.ndarray:
-    """Hard-clip to ±threshold µV (removes extreme voltage spikes)."""
+def _clip_artifacts(data, threshold=100.0):
+    """Hard-clip to ±threshold µV."""
     return np.clip(data, -threshold, threshold)
 
 
-def _normalize(data: np.ndarray) -> np.ndarray:
-    """Per-channel Z-score normalisation (mean=0, std=1)."""
+def _normalize(data):
+    """Per-channel Z-score normalisation."""
     std = np.std(data, axis=0)
-    std[std == 0] = 1.0           # guard against dead channels
+    std[std == 0] = 1.0
     return (data - np.mean(data, axis=0)) / std
 
 
-def _smooth(data: np.ndarray, kernel_size: int = 5) -> np.ndarray:
-    """Simple moving-average smoothing along the time axis."""
+def _smooth(data, kernel_size=5):
+    """Simple moving-average smoothing."""
     kernel = np.ones(kernel_size) / kernel_size
     return np.apply_along_axis(
         lambda m: np.convolve(m, kernel, mode='same'), axis=0, arr=data
     )
 
 
-# ══════════════════════════════════════════════════════════════
-#  ARTEFACT REJECTION
-#
-#  Blink / EOG:
-#    Blinks produce large (100–300 µV) positive deflections primarily at
-#    frontal and near-eye sites (Fp, AF, F channels).  When the peak-to-peak
-#    amplitude on any EOG channel exceeds `eog_threshold` (default 150 µV)
-#    the window is flagged as contaminated.
-#
-#  Jaw-clench / facial EMG:
-#    Jaw clenching creates broadband high-frequency bursts (70–200 µV p-p)
-#    on temporal channels (T7, T8).  We check peak-to-peak on those channels
-#    against `emg_threshold` (default 80 µV).
-#
-#  The DEAP dataset was pre-processed by the authors using automatic artefact
-#  removal (ICA + thresholding).  Applying the same amplitude thresholds
-#  before feature extraction keeps the real-time pipeline consistent with
-#  the training distribution and prevents the model from receiving data it
-#  never saw during training.
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+#  ARTIFACT REJECTION — Blink & Jaw
+#  (CRITICAL: matches DEAP preprocessing)
+# ═══════════════════════════════════════════════════════════════════════════
 
-def _reject_eog_blink(data: np.ndarray,
-                      channel_indices: list,
-                      threshold: float = 150.0) -> bool:
+def _reject_eog_blink(data, eog_indices, threshold=150.0):
     """
-    Return True (→ reject window) if any EOG-prone channel has peak-to-peak
-    amplitude > threshold (µV).
-    data : (samples, channels) after DC removal but BEFORE clipping.
+    Return True (reject window) if any EOG channel has peak-to-peak > threshold.
+    data: (samples, channels) after DC removal.
     """
-    for idx in channel_indices:
+    for idx in eog_indices:
         ch_data = data[:, idx]
-        ptp = np.ptp(ch_data)          # peak-to-peak = max - min
+        ptp = np.ptp(ch_data)  # peak-to-peak
         if ptp > threshold:
             return True
     return False
 
 
-def _reject_jaw_emg(data: np.ndarray,
-                    channel_indices: list,
-                    threshold: float = 80.0) -> bool:
+def _reject_jaw_emg(data, emg_indices, threshold=80.0):
     """
-    Return True (→ reject window) if any temporal / EMG-prone channel has
-    peak-to-peak amplitude > threshold (µV).
+    Return True (reject window) if any EMG channel has peak-to-peak > threshold.
     """
-    for idx in channel_indices:
+    for idx in emg_indices:
         ch_data = data[:, idx]
         if np.ptp(ch_data) > threshold:
             return True
     return False
 
 
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 #  MAIN PREPROCESSING PIPELINE
-#  Matches the DEAP preprocessing assumed by the notebook:
-#   • DEAP's authors applied a 4–45 Hz bandpass + 50 Hz notch + downsampling.
-#   • The notebook then runs filtfilt bandpass per band inside compute_features.
-#   • We replicate the same approach here so the model receives data
-#     it was trained on.
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 
-def preprocess(window: list) -> np.ndarray | None:
+def preprocess(window, eog_ch_indices, emg_ch_indices):
     """
-    Full preprocessing pipeline.
-
-    Parameters
-    ----------
-    window : list of lists, shape (WINDOW_SIZE, n_channels)
-        Raw EEG samples from the buffer.
-
-    Returns
-    -------
-    np.ndarray of shape (WINDOW_SIZE, n_channels) or None if rejected.
+    Full preprocessing matching DEAP + notebook pipeline.
+    
+    window: list of (WINDOW_SIZE, n_channels)
+    eog_ch_indices, emg_ch_indices: channel indices for artifact rejection
+    
+    Returns: np.ndarray of shape (WINDOW_SIZE, n_channels) or None if rejected
     """
     try:
-        print("[PROCESS] Starting preprocessing pipeline...")
+        data = np.array(window, dtype=np.float64)
 
-        data = np.array(window, dtype=np.float64)   # (samples, channels)
-
-        # ── Guard: invalid values ──────────────────────────────
+        # Guard: invalid values
         if not np.isfinite(data).all():
             print("[WARN] NaN/Inf detected → replacing with 0")
             data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # ── Guard: window too short ────────────────────────────
+        # Guard: too small
         if data.shape[0] < 10:
-            print("[WARN] Window has < 10 samples → skipping")
+            print("[WARN] Window < 10 samples → skipping")
             return None
 
-        # ── Step 1: DC offset removal ──────────────────────────
-        print("[STEP] 1/10  DC offset removal")
+        # Step 1: DC removal
         data = _remove_dc(data)
 
-        # ── Step 2: Bandpass 0.5–45 Hz ────────────────────────
-        # Matches butter(4, [low,high], btype='band', fs=fs) in the notebook.
-        print("[STEP] 2/10  Bandpass 0.5–45 Hz")
+        # Step 2: Bandpass 0.5–45 Hz
         data = _bandpass_filter(data, low=0.5, high=45.0, fs=FS)
 
-        # ── Step 3: Notch 50 Hz (power-line Europe/Asia) ──────
-        print("[STEP] 3/10  Notch 50 Hz")
-        data = _notch_filter(data, freq=50.0, fs=FS, Q=30.0)
+        # Step 3: Notch powerline (50 or 60 Hz)
+        data = _notch_filter(data, freq=POWERLINE_HZ, fs=FS, Q=30.0)
 
-        # ── Step 4: Notch 60 Hz (US power-line harmonic guard) ─
-        print("[STEP] 4/10  Notch 60 Hz")
-        data = _notch_filter(data, freq=60.0, fs=FS, Q=30.0)
+        # Step 4: Additional 60 Hz harmonic guard (if main is 50)
+        if POWERLINE_HZ == 50:
+            data = _notch_filter(data, freq=60.0, fs=FS, Q=30.0)
 
-        # ── Step 5: Blink / EOG rejection ─────────────────────
-        # Must happen BEFORE clipping so the raw amplitude is visible.
-        print("[STEP] 5/10  EOG blink rejection (AF3, AF4, F7, F8 — threshold 150 µV)")
-        if _reject_eog_blink(data, EOG_CHANNEL_INDICES, threshold=150.0):
-            print("[REJECT] Window discarded: eye-blink / EOG artefact detected")
+        # Step 5: EOG blink rejection (must be BEFORE clipping to see raw amplitude)
+        if _reject_eog_blink(data, eog_ch_indices, threshold=150.0):
+            print("[REJECT] EOG blink artefact detected")
             return None
 
-        # ── Step 6: Jaw / EMG rejection ───────────────────────
-        print("[STEP] 6/10  EMG jaw rejection (T7, T8 — threshold 80 µV)")
-        if _reject_jaw_emg(data, EMG_CHANNEL_INDICES, threshold=80.0):
-            print("[REJECT] Window discarded: jaw-clench / EMG artefact detected")
+        # Step 6: EMG jaw rejection
+        if _reject_jaw_emg(data, emg_ch_indices, threshold=80.0):
+            print("[REJECT] EMG jaw artefact detected")
             return None
 
-        # ── Step 7: Average re-reference ──────────────────────
-        print("[STEP] 7/10  Average re-reference")
+        # Step 7: Average re-reference
         data = _average_rereference(data)
 
-        # ── Step 8: Hard-clip ±100 µV ─────────────────────────
-        print("[STEP] 8/10  Amplitude clip ±100 µV")
+        # Step 8: Amplitude clip
         data = _clip_artifacts(data, threshold=100.0)
 
-        # ── Step 9: Z-score normalisation ─────────────────────
-        print("[STEP] 9/10  Z-score normalisation")
+        # Step 9: Z-score normalise
         data = _normalize(data)
 
-        # ── Step 10: Smoothing ────────────────────────────────
-        print("[STEP] 10/10 5-sample moving-average smoothing")
+        # Step 10: Smoothing
         data = _smooth(data, kernel_size=5)
 
-        # ── Final sanity check ────────────────────────────────
+        # Final guard
         if not np.isfinite(data).all():
-            print("[ERROR] Output contains NaN/Inf after pipeline → dropping")
+            print("[ERROR] Output corrupted → dropping")
             return None
 
-        print(f"[OK] Preprocessing done | shape={data.shape}\n")
+        print(f"[OK] Preprocessed | shape={data.shape}")
         return data
 
-    except Exception as exc:
-        print(f"[ERROR] Preprocessing crashed: {exc}")
+    except Exception as e:
+        print(f"[ERROR] Preprocessing crashed: {e}")
         return None
 
 
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 #  WEBSOCKET SERVER
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 
 async def handler(websocket):
-    print("WebSocket client connected")
+    """Accept incoming WebSocket connections (for future UI clients)."""
+    print("[WS] Client connected")
     clients.add(websocket)
     try:
         await websocket.wait_closed()
     finally:
         clients.discard(websocket)
-        print("WebSocket client disconnected")
+        print("[WS] Client disconnected")
 
 
-async def broadcast(message: str):
+async def broadcast(message):
+    """Broadcast message to all connected clients."""
     if not clients:
         return
     dead = set()
@@ -293,120 +320,239 @@ async def broadcast(message: str):
     clients -= dead
 
 
-# ══════════════════════════════════════════════════════════════
+def broadcast_payload(payload, loop):
+    """Threadsafe broadcast from EEG thread."""
+    asyncio.run_coroutine_threadsafe(
+        broadcast(json.dumps(payload)), loop
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CHANNEL MAPPING (Cortex → Model)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def set_eeg_columns(cols):
+    """Extract channel indices from Cortex message."""
+    global eeg_columns, eeg_channel_indices
+
+    if not isinstance(cols, list) or not cols:
+        return
+
+    eeg_columns = cols
+    if all(name in cols for name in MODEL_CHANNELS):
+        eeg_channel_indices = [cols.index(name) for name in MODEL_CHANNELS]
+        print(f"[MODEL] Channel mapping: {MODEL_CHANNELS}")
+    else:
+        missing = [name for name in MODEL_CHANNELS if name not in cols]
+        eeg_channel_indices = None
+        print(f"[WARN] Missing channels for model: {missing}")
+
+
+def get_eog_emg_indices(cols):
+    """Get channel indices for artifact rejection."""
+    eog_indices, emg_indices = [], []
+    for idx, name in enumerate(cols):
+        if name in EOG_CHANNELS:
+            eog_indices.append(idx)
+        if name in EMG_CHANNELS:
+            emg_indices.append(idx)
+    return eog_indices, emg_indices
+
+
+def maybe_extract_eeg_columns(message):
+    """Try to extract channel metadata from Cortex message."""
+    if not isinstance(message, dict):
+        return
+
+    # Option 1: EEG stream payload
+    eeg_payload = message.get("eeg")
+    if isinstance(eeg_payload, dict) and isinstance(eeg_payload.get("cols"), list):
+        set_eeg_columns(eeg_payload["cols"])
+        return
+
+    # Option 2: Subscribe response
+    result = message.get("result")
+    if isinstance(result, dict):
+        success = result.get("success")
+        if isinstance(success, list):
+            for item in success:
+                if item.get("streamName") == "eeg" and isinstance(item.get("cols"), list):
+                    set_eeg_columns(item["cols"])
+                    return
+
+
+def extract_model_sample(eeg):
+    """Extract 14 brain channels from Cortex EEG packet."""
+    if not isinstance(eeg, list):
+        return None
+
+    try:
+        # Use explicit channel mapping if available
+        if eeg_channel_indices:
+            return [float(eeg[index]) for index in eeg_channel_indices]
+
+        # Fallback: try last 14 channels (common in Cortex SDK versions)
+        if len(eeg) >= 16:
+            return [float(value) for value in eeg[2:16]]
+        if len(eeg) >= 15:
+            return [float(value) for value in eeg[1:15]]
+        if len(eeg) == 14:
+            return [float(value) for value in eeg[:14]]
+    except (TypeError, ValueError, IndexError):
+        return None
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  EEG BUFFER & WINDOWING
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 
-def handle_eeg(eeg: list, loop: asyncio.AbstractEventLoop):
-    """Called for every raw EEG packet from the Cortex stream."""
-    global buffer
+def handle_eeg(eeg, loop):
+    """Process incoming EEG sample."""
+    global buffer, emotion_engine
 
-    # Guard: malformed packet
-    if not isinstance(eeg, list) or len(eeg) < 2:
-        print("[WARN] Malformed EEG packet, skipping")
+    # Guard: malformed
+    if not isinstance(eeg, list) or len(eeg) < 5:
         return
 
-    sample = eeg[1:]           # index 0 is the Cortex COUNTER/timestamp
-
-    # Guard: wrong channel count
-    if len(sample) != len(CHANNELS):
-        print(f"[WARN] Expected {len(CHANNELS)} channels, got {len(sample)}")
-        return
-
+    # Keep full Cortex packet for recording
+    raw_packet = eeg.copy()
+    sample = eeg[1:]  # remove Cortex counter
     buffer.append(sample)
 
+    # Feed model if available
+    if emotion_engine is not None:
+        model_sample = extract_model_sample(eeg)
+        if model_sample is not None:
+            try:
+                emotion_engine.push_sample(model_sample)
+            except Exception as exc:
+                print(f"[WARN] Emotion sample rejected: {exc}")
+
+    # Process window
     if len(buffer) >= WINDOW_SIZE:
         window = list(buffer[:WINDOW_SIZE])
-        del buffer[:OVERLAP]   # slide forward by OVERLAP samples
+        del buffer[:OVERLAP]
+        timestamp = time.time()
 
-        clean = preprocess(window)
+        # Get channel indices for artifact rejection
+        if eeg_columns:
+            eog_indices, emg_indices = get_eog_emg_indices(eeg_columns)
+        else:
+            # Fallback: assume standard Emotiv order
+            eog_indices = [
+                MODEL_CHANNELS.index(ch) for ch in ["AF3", "AF4", "F7", "F8"]
+            ]
+            emg_indices = [
+                MODEL_CHANNELS.index(ch) for ch in ["T7", "T8"]
+            ]
+
+        # Preprocess with artifact rejection
+        clean = preprocess(window, eog_indices, emg_indices)
+
         if clean is not None:
-            message = json.dumps({
-                "timestamp": time.time(),
-                "channels":  CHANNELS,
-                "data":      clean.tolist(),   # (256, 14) list-of-lists
+            # Broadcast EEG window
+            broadcast_payload({
+                "type": "eeg_window",
+                "timestamp": timestamp,
+                "data": clean.tolist(),
+            }, loop)
+
+            # Record if enabled
+            record_preprocessed({
+                "timestamp": timestamp,
+                "data": clean.tolist(),
             })
-            asyncio.run_coroutine_threadsafe(broadcast(message), loop)
+
+        # Inference
+        if emotion_engine is not None:
+            try:
+                emotion_message = emotion_engine.predict(timestamp=timestamp)
+            except Exception as exc:
+                print(f"[WARN] Inference failed: {exc}")
+                emotion_message = None
+
+            if emotion_message is not None:
+                broadcast_payload(emotion_message, loop)
+                record_emotion(emotion_message)
 
 
-# ══════════════════════════════════════════════════════════════
-#  CORTEX SDK CLIENT
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+#  CORTEX CLIENT (WebSocket)
+# ═══════════════════════════════════════════════════════════════════════════
 
-def start_cortex(loop: asyncio.AbstractEventLoop):
+def start_cortex(loop):
+    """Connect to Emotiv Cortex via WebSocket."""
     global session_id, auth_token
 
     request_id = 0
 
-    def send(ws, method: str, params: dict):
+    def send(ws, method, params):
         nonlocal request_id
         request_id += 1
         ws.send(json.dumps({
-            "id":       request_id,
-            "jsonrpc":  "2.0",
-            "method":   method,
-            "params":   params,
+            "id": request_id,
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
         }))
 
-    def on_message(ws, message: str):
+    def on_message(ws, message):
         global session_id, auth_token
 
         data = json.loads(message)
+        maybe_extract_eeg_columns(data)
 
-        if "error" in data:
-            print(f"[CORTEX ERROR] {data['error']}")
-            return
-
-        # ── Auth response ──────────────────────────────────────
-        if "result" in data and isinstance(data["result"], dict) \
-                and "cortexToken" in data["result"]:
+        # Auth response
+        if "result" in data and "cortexToken" in data["result"]:
             auth_token = data["result"]["cortexToken"]
-            print("[CORTEX] Authorised — querying headsets")
             send(ws, "queryHeadsets", {})
 
-        # ── Headset list ───────────────────────────────────────
+        # Headset list
         elif "result" in data and isinstance(data["result"], list):
             headsets = data["result"]
             if not headsets:
-                print("[CORTEX] No headset found. Is the Emotiv dongle plugged in?")
+                print("[CORTEX] No headset found")
                 return
             headset_id = headsets[0]["id"]
-            print(f"[CORTEX] Found headset: {headset_id}")
+            print(f"[CORTEX] Found: {headset_id}")
             send(ws, "controlDevice", {"command": "connect", "headset": headset_id})
             time.sleep(1)
             send(ws, "createSession", {
                 "cortexToken": auth_token,
-                "headset":     headset_id,
-                "status":      "active",
+                "headset": headset_id,
+                "status": "active",
             })
 
-        # ── Session created ────────────────────────────────────
-        elif "result" in data and isinstance(data["result"], dict) \
-                and "id" in data["result"]:
+        # Session created
+        elif "result" in data and isinstance(data["result"], dict) and "id" in data["result"]:
             session_id = data["result"]["id"]
-            print(f"[CORTEX] Session created: {session_id}")
+            print(f"[CORTEX] Session: {session_id}")
             send(ws, "subscribe", {
                 "cortexToken": auth_token,
-                "session":     session_id,
-                "streams":     ["eeg"],
+                "session": session_id,
+                "streams": ["eeg"],
             })
 
-        # ── EEG data ───────────────────────────────────────────
+        # EEG data
         elif "eeg" in data:
-            handle_eeg(data["eeg"], loop)
+            eeg_payload = data["eeg"]
+            if isinstance(eeg_payload, list):
+                handle_eeg(eeg_payload, loop)
 
     def on_open(ws):
-        print("[CORTEX] Connected — authorising …")
+        print("[CORTEX] Connecting…")
         send(ws, "authorize", {
-            "clientId":     CLIENT_ID,
+            "clientId": CLIENT_ID,
             "clientSecret": CLIENT_SECRET,
         })
 
     def on_error(ws, error):
-        print(f"[CORTEX] WebSocket error: {error}")
+        print(f"[CORTEX] Error: {error}")
 
     def on_close(ws, code, msg):
-        print(f"[CORTEX] Connection closed ({code}: {msg})")
+        print(f"[CORTEX] Closed ({code}: {msg})")
 
     app = ws_client.WebSocketApp(
         CORTEX_URL,
@@ -415,22 +561,76 @@ def start_cortex(loop: asyncio.AbstractEventLoop):
         on_error=on_error,
         on_close=on_close,
     )
-    app.run_forever(sslopt={"cert_reqs": 0})   # Cortex uses self-signed cert
+    app.run_forever(sslopt={"cert_reqs": 0})
 
 
-# ══════════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+#  LSL CLIENT (Lab Streaming Layer)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def start_lsl(loop):
+    """Connect to EmotivPRO LSL stream."""
+    if not HAS_LSL:
+        print("[LSL] pylsl not installed. Install with: pip install pylsl")
+        return
+
+    print("[LSL] Searching for EEG stream…")
+    streams = pylsl.resolve_streams(pred="type='EEG'")
+    if not streams:
+        print("[LSL] No EEG stream found. Enable LSL in EmotivPRO.")
+        return
+
+    inlet = pylsl.StreamInlet(streams[0])
+    info = inlet.info()
+    ch_count = info.channel_count()
+    print(f"[LSL] Connected to '{info.name()}' ({ch_count} channels)")
+
+    # Extract channel names from metadata
+    ch_list = []
+    for i in range(ch_count):
+        ch = info.desc().child_value_n("channel", i)
+        label = ch.child_value("label") if ch else f"Ch{i}"
+        ch_list.append(label)
+    set_eeg_columns(ch_list)
+
+    # Read stream
+    while True:
+        sample, timestamp = inlet.pull_sample()
+        if sample:
+            # LSL sample is raw values (no counter), so prepend 0
+            eeg_packet = [0] + list(sample)
+            handle_eeg(eeg_packet, loop)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════════════════
 
 async def main():
+    global emotion_engine
+
     loop = asyncio.get_running_loop()
+    init_recording()
+    emotion_engine = create_emotion_engine()
 
-    # Start Cortex client in a background daemon thread
-    threading.Thread(target=start_cortex, args=(loop,), daemon=True).start()
+    # Start EEG source
+    if USE_LSL:
+        print("[MAIN] Using LSL source")
+        if not HAS_LSL:
+            print("[ERROR] LSL requested but pylsl not available. Install: pip install pylsl")
+            return
+        threading.Thread(target=start_lsl, args=(loop,), daemon=True).start()
+    else:
+        if not CLIENT_SECRET:
+            print("[WARN] CORTEX_CLIENT_SECRET not set; EEG ingestion disabled")
+        else:
+            print("[MAIN] Using Cortex WebSocket")
+            threading.Thread(target=start_cortex, args=(loop,), daemon=True).start()
 
-    async with websockets.serve(handler, "0.0.0.0", WS_SERVER_PORT):
-        print(f"[SERVER] Broadcasting clean EEG on ws://localhost:{WS_SERVER_PORT}")
-        await asyncio.Future()   # run forever
+    # Start WebSocket server
+    async with websockets.serve(handler, WS_SERVER_HOST, WS_SERVER_PORT):
+        print(f"[SERVER] Broadcasting on ws://{WS_SERVER_HOST}:{WS_SERVER_PORT}")
+        await asyncio.Future()
 
 
 if __name__ == "__main__":
