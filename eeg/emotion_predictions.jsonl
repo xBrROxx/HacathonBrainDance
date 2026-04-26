@@ -1145,3 +1145,42 @@
 {"type": "emotion", "emotion": "angry", "confidence": 0.77, "timestamp": 1777196552.133555, "features": {"alpha": 0.042, "beta": 0.398, "theta": 0.131, "gamma": 0.43}, "source": "eeg_model"}
 {"type": "emotion", "emotion": "angry", "confidence": 0.721, "timestamp": 1777196555.1356728, "features": {"alpha": 0.043, "beta": 0.474, "theta": 0.189, "gamma": 0.294}, "source": "eeg_model"}
 {"type": "emotion", "emotion": "angry", "confidence": 0.773, "timestamp": 1777196559.1051395, "features": {"alpha": 0.019, "beta": 0.882, "theta": 0.022, "gamma": 0.077}, "source": "eeg_model"}
+{"type": "status", "status": "calibrating", "progress": 0.12, "timestamp": 1777196738.7306232}
+{"type": "status", "status": "calibrating", "progress": 0.25, "timestamp": 1777196739.743284}
+{"type": "status", "status": "calibrating", "progress": 0.38, "timestamp": 1777196740.7522988}
+{"type": "status", "status": "calibrating", "progress": 0.5, "timestamp": 1777196741.7319524}
+{"type": "status", "status": "calibrating", "progress": 0.62, "timestamp": 1777196742.7504606}
+{"type": "status", "status": "calibrating", "progress": 0.75, "timestamp": 1777196743.7254488}
+{"type": "status", "status": "calibrating", "progress": 0.88, "timestamp": 1777196744.741397}
+{"type": "status", "status": "calibrating", "progress": 1.0, "timestamp": 1777196745.7322006}
+{"type": "emotion", "emotion": "focused", "confidence": 0.777, "timestamp": 1777196748.7048554, "features": {"alpha": 0.022, "beta": 0.796, "theta": 0.037, "gamma": 0.146}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "focused", "confidence": 0.789, "timestamp": 1777196756.6623383, "features": {"alpha": 0.026, "beta": 0.79, "theta": 0.051, "gamma": 0.133}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "focused", "confidence": 0.836, "timestamp": 1777196760.6196117, "features": {"alpha": 0.047, "beta": 0.591, "theta": 0.127, "gamma": 0.235}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "focused", "confidence": 0.716, "timestamp": 1777196763.6301384, "features": {"alpha": 0.052, "beta": 0.584, "theta": 0.133, "gamma": 0.232}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.68, "timestamp": 1777196774.712331, "features": {"alpha": 0.189, "beta": 0.216, "theta": 0.52, "gamma": 0.075}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.657, "timestamp": 1777196778.6899474, "features": {"alpha": 0.155, "beta": 0.111, "theta": 0.68, "gamma": 0.054}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.766, "timestamp": 1777196789.627066, "features": {"alpha": 0.137, "beta": 0.185, "theta": 0.599, "gamma": 0.08}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.8, "timestamp": 1777196793.6010067, "features": {"alpha": 0.144, "beta": 0.421, "theta": 0.276, "gamma": 0.16}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.839, "timestamp": 1777196803.7105236, "features": {"alpha": 0.209, "beta": 0.116, "theta": 0.551, "gamma": 0.124}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.735, "timestamp": 1777196807.7087502, "features": {"alpha": 0.134, "beta": 0.081, "theta": 0.728, "gamma": 0.057}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.722, "timestamp": 1777196811.679277, "features": {"alpha": 0.138, "beta": 0.181, "theta": 0.642, "gamma": 0.038}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.797, "timestamp": 1777196815.6662903, "features": {"alpha": 0.173, "beta": 0.132, "theta": 0.676, "gamma": 0.019}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.704, "timestamp": 1777196827.6539161, "features": {"alpha": 0.083, "beta": 0.086, "theta": 0.797, "gamma": 0.035}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.72, "timestamp": 1777196830.7154713, "features": {"alpha": 0.181, "beta": 0.17, "theta": 0.561, "gamma": 0.088}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.735, "timestamp": 1777196840.726042, "features": {"alpha": 0.025, "beta": 0.053, "theta": 0.903, "gamma": 0.019}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.644, "timestamp": 1777196844.713143, "features": {"alpha": 0.042, "beta": 0.059, "theta": 0.875, "gamma": 0.024}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.69, "timestamp": 1777196853.6186347, "features": {"alpha": 0.198, "beta": 0.146, "theta": 0.561, "gamma": 0.095}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.781, "timestamp": 1777196857.572635, "features": {"alpha": 0.158, "beta": 0.141, "theta": 0.628, "gamma": 0.073}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.786, "timestamp": 1777196860.5970285, "features": {"alpha": 0.167, "beta": 0.14, "theta": 0.596, "gamma": 0.097}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.789, "timestamp": 1777196870.6952734, "features": {"alpha": 0.093, "beta": 0.177, "theta": 0.669, "gamma": 0.06}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.819, "timestamp": 1777196874.6851132, "features": {"alpha": 0.174, "beta": 0.267, "theta": 0.349, "gamma": 0.211}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.86, "timestamp": 1777196885.5866756, "features": {"alpha": 0.146, "beta": 0.155, "theta": 0.614, "gamma": 0.086}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.742, "timestamp": 1777196891.5684426, "features": {"alpha": 0.289, "beta": 0.112, "theta": 0.531, "gamma": 0.067}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.747, "timestamp": 1777196894.624744, "features": {"alpha": 0.109, "beta": 0.151, "theta": 0.433, "gamma": 0.307}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.813, "timestamp": 1777196897.6561718, "features": {"alpha": 0.103, "beta": 0.119, "theta": 0.544, "gamma": 0.235}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "calm", "confidence": 0.781, "timestamp": 1777196900.678261, "features": {"alpha": 0.108, "beta": 0.091, "theta": 0.66, "gamma": 0.141}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.854, "timestamp": 1777196911.6420937, "features": {"alpha": 0.166, "beta": 0.205, "theta": 0.567, "gamma": 0.062}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "angry", "confidence": 0.835, "timestamp": 1777196915.613906, "features": {"alpha": 0.1, "beta": 0.261, "theta": 0.531, "gamma": 0.108}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "focused", "confidence": 0.94, "timestamp": 1777196926.5928845, "features": {"alpha": 0.018, "beta": 0.799, "theta": 0.021, "gamma": 0.161}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "focused", "confidence": 0.938, "timestamp": 1777196929.637152, "features": {"alpha": 0.031, "beta": 0.722, "theta": 0.063, "gamma": 0.184}, "source": "eeg_model"}
+{"type": "emotion", "emotion": "focused", "confidence": 0.889, "timestamp": 1777196932.6485806, "features": {"alpha": 0.283, "beta": 0.351, "theta": 0.197, "gamma": 0.168}, "source": "eeg_model"}

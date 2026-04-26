@@ -17,9 +17,12 @@ Environment variables:
   EEG_WS_HOST                — WebSocket server host (default: 127.0.0.1)
   EEG_WS_PORT                — WebSocket server port (default: 8765)
   EEG_POWERLINE_HZ           — Powerline frequency for notch filter (default: 50)
-  EEG_EMOTION_ARTIFACT_DIR   — Path to valence_xgb.joblib & scaler.joblib (auto-detected)
-  RECORD_PREDICTIONS         — If set, write emotion messages to JSONL file
-  RECORD_PREPROCESSED       — If set, write preprocessed windows to JSONL file
+  EEG_EMOTION_ARTIFACT_DIR   — Path to model artifacts directory (auto-detected)
+  EEG_VALENCE_MODEL_PATH     — Direct path to valence_xgb.joblib
+  EEG_AROUSAL_MODEL_PATH     — Direct path to arousal_xgb.joblib
+  EEG_SCALER_PATH            — Direct path to scaler.joblib
+  PREDICTIONS_JSONL          — Override path to predictions log file
+  RECORD_PREPROCESSED        — If set, write preprocessed windows to JSONL file
 """
 
 import os
@@ -76,8 +79,16 @@ EOG_CHANNELS = ["AF3", "AF4", "F7", "F8"]
 EMG_CHANNELS = ["T7", "T8"]
 
 # Record options
-RECORD_PREDICTIONS  = os.getenv("RECORD_PREDICTIONS")
 RECORD_PREPROCESSED = os.getenv("RECORD_PREPROCESSED")
+
+# Predictions JSONL — always written, path unified so tailer finds same file.
+# Resolves to HacathonBrainDance/emotion_predictions.jsonl regardless of CWD.
+_SERVER_DIR      = os.path.dirname(os.path.abspath(__file__))   # eeg/
+_REPO_ROOT       = os.path.dirname(_SERVER_DIR)                  # HacathonBrainDance/
+PREDICTIONS_JSONL = os.getenv(
+    "PREDICTIONS_JSONL",
+    os.path.join(_REPO_ROOT, "emotion_predictions.jsonl")
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  GLOBAL STATE
@@ -102,9 +113,9 @@ preprocessed_file   = None
 def init_recording():
     global prediction_file, preprocessed_file
 
-    if RECORD_PREDICTIONS:
-        prediction_file = open("emotion_predictions.jsonl", "a", buffering=1)
-        print(f"[RECORD] Emotions → emotion_predictions.jsonl")
+    # Always open predictions file — it is the live feed for the browser tailer
+    prediction_file = open(PREDICTIONS_JSONL, "a", buffering=1)
+    print(f"[RECORD] Emotions → {PREDICTIONS_JSONL}")
 
     if RECORD_PREPROCESSED:
         preprocessed_file = open("eeg_preprocessed.jsonl", "a", buffering=1)
@@ -131,8 +142,12 @@ def create_emotion_engine():
         return None
 
     try:
-        engine = EmotionInferenceEngine()
-        print("[MODEL] Emotion inference ready")
+        engine = EmotionInferenceEngine(
+            valence_xgb_path=os.getenv("EEG_VALENCE_MODEL_PATH"),
+            arousal_xgb_path=os.getenv("EEG_AROUSAL_MODEL_PATH"),
+            scaler_path=os.getenv("EEG_SCALER_PATH"),
+        )
+        print("[MODEL] Emotion inference ready (valence + arousal)")
         return engine
     except MissingArtifactsError as exc:
         print(f"[WARN] Emotion inference disabled: {exc}")
@@ -655,9 +670,7 @@ async def main():
     # Start WebSocket server
     async with websockets.serve(handler, WS_SERVER_HOST, WS_SERVER_PORT):
         print(f"[SERVER] Broadcasting on ws://{WS_SERVER_HOST}:{WS_SERVER_PORT}")
-# Bridge: tail JSONL file → broadcast to browser
-        jsonl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emotion_predictions.jsonl")
-        asyncio.create_task(tail_jsonl_and_broadcast(jsonl_path))
+        asyncio.create_task(tail_jsonl_and_broadcast(PREDICTIONS_JSONL))
         await asyncio.Future()
 
 
