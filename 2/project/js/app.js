@@ -60,6 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let switchLockedUntil = 0;
     let autoPlayTimer = null;
     let pendingEmotion = null;
+    let pendingAutoplay = false;
 
     // Last received features and confidence
     let liveFeatures = null;
@@ -476,6 +477,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 analyser.connect(audioContext.destination);
             }
             if (audioContext.state === 'suspended') audioContext.resume();
+            if (pendingAutoplay) {
+                pendingAutoplay = false;
+                playCurrentSong();
+            }
         }, { once: true });
     }
 
@@ -495,11 +500,20 @@ document.addEventListener('DOMContentLoaded', () => {
             audioElement.src = currentTrackFile;
             audioElement.load();
         }
-        audioElement.play().catch(e => console.warn('Play blocked:', e));
-        isPlaying = true;
-        playBtn.textContent = '⏸';
-        playingTag.textContent = 'PLAYING';
-        startProgressUpdater();
+        audioElement.play()
+            .then(() => {
+                isPlaying = true;
+                playBtn.textContent = '⏸';
+                playingTag.textContent = 'PLAYING';
+                startProgressUpdater();
+            })
+            .catch(e => {
+                pendingAutoplay = true;
+                isPlaying = false;
+                playBtn.textContent = '▶';
+                playingTag.textContent = 'TAP TO ENABLE AUDIO';
+                console.warn('Play blocked:', e);
+            });
     }
 
     function pauseSong() {
