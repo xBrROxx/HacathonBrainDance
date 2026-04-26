@@ -34,7 +34,6 @@ import time
 import numpy as np
 from scipy.signal import butter, filtfilt, iirnotch
 import websocket as ws_client
-import dotenv
 
 
 try:
@@ -57,10 +56,29 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════════════
 from dotenv import load_dotenv
 load_dotenv()
+
+def _env_flag(name, default=False):
+    """Parse common env boolean forms safely."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_path(env_name, default_path):
+    """Resolve env path; relative paths are anchored at this file's directory."""
+    raw = os.getenv(env_name)
+    if not raw:
+        return os.path.abspath(default_path)
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.abspath(os.path.join(_SERVER_DIR, expanded))
+
 CLIENT_ID           = os.getenv("CORTEX_CLIENT_ID", "braindance")
 CLIENT_SECRET       = os.getenv("CORTEX_CLIENT_SECRET")
 CORTEX_URL          = os.getenv("CORTEX_URL", "wss://localhost:6868")
-USE_LSL             = bool(os.getenv("USE_LSL"))
+USE_LSL             = _env_flag("USE_LSL", default=False)
 WS_SERVER_HOST      = os.getenv("EEG_WS_HOST", "127.0.0.1")
 WS_SERVER_PORT      = int(os.getenv("EEG_WS_PORT", "8765"))
 
@@ -85,9 +103,13 @@ RECORD_PREPROCESSED = os.getenv("RECORD_PREPROCESSED")
 # Resolves to HacathonBrainDance/emotion_predictions.jsonl regardless of CWD.
 _SERVER_DIR      = os.path.dirname(os.path.abspath(__file__))   # eeg/
 _REPO_ROOT       = os.path.dirname(_SERVER_DIR)                  # HacathonBrainDance/
-PREDICTIONS_JSONL = os.getenv(
+PREDICTIONS_JSONL = _resolve_path(
     "PREDICTIONS_JSONL",
     os.path.join(_REPO_ROOT, "emotion_predictions.jsonl")
+)
+PREPROCESSED_JSONL = _resolve_path(
+    "PREPROCESSED_JSONL",
+    os.path.join(_SERVER_DIR, "eeg_preprocessed.jsonl")
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -118,8 +140,8 @@ def init_recording():
     print(f"[RECORD] Emotions → {PREDICTIONS_JSONL}")
 
     if RECORD_PREPROCESSED:
-        preprocessed_file = open("eeg_preprocessed.jsonl", "a", buffering=1)
-        print(f"[RECORD] Windows → eeg_preprocessed.jsonl")
+        preprocessed_file = open(PREPROCESSED_JSONL, "a", buffering=1)
+        print(f"[RECORD] Windows → {PREPROCESSED_JSONL}")
 
 
 def record_emotion(msg):
@@ -670,7 +692,6 @@ async def main():
     # Start WebSocket server
     async with websockets.serve(handler, WS_SERVER_HOST, WS_SERVER_PORT):
         print(f"[SERVER] Broadcasting on ws://{WS_SERVER_HOST}:{WS_SERVER_PORT}")
-        asyncio.create_task(tail_jsonl_and_broadcast(PREDICTIONS_JSONL))
         await asyncio.Future()
 
 
