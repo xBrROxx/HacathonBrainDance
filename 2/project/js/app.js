@@ -13,7 +13,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Stability: keep a rolling window of the last N emotion readings.
     // Only switch emotion if the new one wins a majority of that window.
-    // Matches the backend EmotionSmoother history_size=5 / min_stable_votes=3.
     const HISTORY_SIZE = 10;
     const MAJORITY_THRESHOLD = 6;   // out of 10 must agree to switch
 
@@ -25,11 +24,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ── Emotion presets ───────────────────────────────────────────────
     const EMOTION_PRESETS = {
-        calm: { color: '#4fc3f7', waves: { delta: 12, theta: 35, alpha: 80, beta: 20, gamma: 8 }, intensity: 65 },
-        happy: { color: '#ffd54f', waves: { delta: 5, theta: 15, alpha: 40, beta: 60, gamma: 35 }, intensity: 82 },
-        angry: { color: '#ef5350', waves: { delta: 3, theta: 8, alpha: 12, beta: 85, gamma: 70 }, intensity: 91 },
-        sad: { color: '#7e57c2', waves: { delta: 20, theta: 45, alpha: 25, beta: 30, gamma: 10 }, intensity: 58 },
-        focused: { color: '#66bb6a', waves: { delta: 4, theta: 20, alpha: 65, beta: 55, gamma: 30 }, intensity: 75 },
+        calm: { color: '#4fc3f7', intensity: 65 },
+        happy: { color: '#ffd54f', intensity: 82 },
+        angry: { color: '#ef5350', intensity: 91 },
+        sad: { color: '#7e57c2', intensity: 58 },
+        focused: { color: '#66bb6a', intensity: 75 },
     };
     const SUPPORTED_EMOTIONS = Object.keys(EMOTION_PRESETS);
 
@@ -37,7 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
     //  STATE
     // ═══════════════════════════════════════════════════════════════════
     let songCache = { calm: [], happy: [], angry: [], sad: [], focused: [] };
-    let currentEmotion = null;    // null until first detection
+    let currentEmotion = null;
     let currentTrackFile = null;
     let isPlaying = false;
     let audioElement = null;
@@ -57,12 +56,12 @@ document.addEventListener('DOMContentLoaded', () => {
     let spikePhase = 0;
 
     // Stability tracking
-    let emotionHistory = [];      // rolling array of last HISTORY_SIZE emotion strings
+    let emotionHistory = [];
     let switchLockedUntil = 0;
     let autoPlayTimer = null;
-    let pendingEmotion = null;    // emotion waiting for autoplay delay
+    let pendingEmotion = null;
 
-    // Last received band powers and confidence (for live display)
+    // Last received features and confidence
     let liveFeatures = null;
     let liveConfidence = null;
 
@@ -76,8 +75,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const eegStatus = document.getElementById('eegStatus');
     const wsStatusSpan = document.getElementById('wsStatus');
     const modeNote = document.getElementById('modeNote');
-    const intensityVal = document.getElementById('intensityVal');
-    const intensityFill = document.getElementById('intensityFill');
     const trackName = document.getElementById('trackName');
     const trackSub = document.getElementById('trackSub');
     const albumArt = document.getElementById('albumArt');
@@ -96,7 +93,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const barCanvas = document.getElementById('visBar');
     const radialCanvas = document.getElementById('visRadial');
 
-    // ── Live EEG data panel (injected) ────────────────────────────────
+    // ── Live EEG data panel ───────────────────────────────────────────
     let eegDataPanel = null;
 
     function buildEegDataPanel() {
@@ -320,18 +317,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!SUPPORTED_EMOTIONS.includes(emotion)) return;
         if (confidence < MIN_CONFIDENCE) return;
 
-        // Always update live data display regardless of switch logic
         liveFeatures = features;
         liveConfidence = confidence;
         updateEegDataPanel(features, confidence, emotion);
 
-        // Push to rolling history
         pushToHistory(emotion);
 
-        // Check majority
         const majorityEmotion = getMajorityEmotion();
 
-        // FIX: If no majority yet, update UI AND status so user knows data is flowing
         if (!majorityEmotion) {
             updateEmotionColors(emotion, confidence);
             setConnectionState(
@@ -342,7 +335,6 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // If same as current and music is playing — just refresh UI
         if (majorityEmotion === currentEmotion && isPlaying) {
             updateEmotionColors(majorityEmotion, confidence);
             setConnectionState(
@@ -353,20 +345,31 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Cooldown guard — don't thrash between emotions
         const now = Date.now();
         if (majorityEmotion !== currentEmotion && now < switchLockedUntil) return;
 
-        // New emotion confirmed by majority — schedule autoplay
         if (majorityEmotion !== pendingEmotion) {
             pendingEmotion = majorityEmotion;
             if (autoPlayTimer) clearTimeout(autoPlayTimer);
 
-            const songs = await ensureSongs(majorityEmotion);
-            if (!songs || songs.length === 0) return;
+            let songs = await ensureSongs(majorityEmotion);
+            if (!songs || songs.length === 0) {
+                const fallback = SUPPORTED_EMOTIONS.find(e => songCache[e] && songCache[e].length > 0);
+                if (!fallback) return;
+                songs = songCache[fallback];
+            }
 
             updateEmotionColors(majorityEmotion, confidence);
-            setCurrentSong(majorityEmotion);
+
+            // Stage the new song WITHOUT updating currentEmotion yet
+            const song = getRandomSong(majorityEmotion);
+            if (song) {
+                currentTrackFile = song.file;
+                trackName.textContent = song.name;
+                albumArt.textContent = song.emoji;
+                trackSub.textContent = `${majorityEmotion.charAt(0).toUpperCase() + majorityEmotion.slice(1)} · BrainDance`;
+                if (audioElement) { audioElement.src = song.file; audioElement.load(); }
+            }
 
             setConnectionState(
                 `Detected: ${majorityEmotion} (${Math.round(confidence * 100)}%)`,
@@ -375,10 +378,10 @@ document.addEventListener('DOMContentLoaded', () => {
             );
 
             autoPlayTimer = setTimeout(async () => {
-                // Only switch if the majority still agrees after the delay
                 const stillMajority = getMajorityEmotion();
                 if (stillMajority !== majorityEmotion) return;
 
+                // NOW commit the emotion change and start the correct music
                 currentEmotion = majorityEmotion;
                 switchLockedUntil = Date.now() + SWITCH_LOCK_MS;
                 pendingEmotion = null;
@@ -405,39 +408,11 @@ document.addEventListener('DOMContentLoaded', () => {
         eegDot.style.background = preset.color;
         eegStatus.style.color = preset.color;
 
-        const pct = confidence !== null
-            ? Math.round(Math.max(0, Math.min(1, confidence)) * 100)
-            : preset.intensity;
-        intensityVal.textContent = pct + '%';
-        intensityFill.style.width = pct + '%';
-
         document.querySelectorAll('.emotion-btn').forEach(btn =>
             btn.classList.toggle('active', btn.dataset.emotion === emotion)
         );
         flash.style.opacity = '0.08';
         setTimeout(() => flash.style.opacity = '0', 150);
-    }
-
-    function updateBandBars(features, emotion) {
-        const preset = EMOTION_PRESETS[emotion] || EMOTION_PRESETS['calm'];
-        const toDisplay = v => (typeof v === 'number' && !isNaN(v))
-            ? Math.max(0, Math.min(100, Math.round(v * 100))) : null;
-
-        const vals = {
-            delta: preset.waves.delta,
-            theta: toDisplay(features && features.theta) ?? preset.waves.theta,
-            alpha: toDisplay(features && features.alpha) ?? preset.waves.alpha,
-            beta: toDisplay(features && features.beta) ?? preset.waves.beta,
-            gamma: toDisplay(features && features.gamma) ?? preset.waves.gamma,
-        };
-
-        for (const band in vals) {
-            const cap = band.charAt(0).toUpperCase() + band.slice(1);
-            const valEl = document.getElementById('w' + cap);
-            const barEl = document.getElementById('w' + cap + 'Bar');
-            if (valEl) valEl.textContent = vals[band];
-            if (barEl) barEl.style.width = Math.min(vals[band], 100) + '%';
-        }
     }
 
     function setConnectionState(statusText, modeHtml, eegLabel) {
@@ -462,11 +437,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 pendingEmotion = null;
                 const songs = await ensureSongs(em);
                 if (!songs || songs.length === 0) return;
+
+                // Fully commit the emotion switch immediately on manual click
                 currentEmotion = em;
-                setCurrentSong(em);
                 updateEmotionColors(em, null);
-                updateBandBars(null, em);
+                setCurrentSong(em);   // sets currentTrackFile, trackName, albumArt
                 playCurrentSong();
+
                 setConnectionState(
                     `Manual: ${em}`,
                     `Simulation mode — <strong style="color:${EMOTION_PRESETS[em].color}">${em}</strong> selected manually.`,
@@ -515,7 +492,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function playCurrentSong() {
         if (!audioElement || !currentTrackFile) return;
         if (audioElement.src !== window.location.origin + '/' + currentTrackFile) {
-            audioElement.src = currentTrackFile; audioElement.load();
+            audioElement.src = currentTrackFile;
+            audioElement.load();
         }
         audioElement.play().catch(e => console.warn('Play blocked:', e));
         isPlaying = true;
@@ -536,14 +514,17 @@ document.addEventListener('DOMContentLoaded', () => {
     function togglePlay() { if (isPlaying) pauseSong(); else playCurrentSong(); }
 
     async function nextTrack() {
+        // Always use currentEmotion so the next track is from the correct folder
         const em = currentEmotion || 'calm';
         const song = getRandomSong(em);
         if (!song) return;
         currentTrackFile = song.file;
         trackName.textContent = song.name;
         albumArt.textContent = song.emoji;
+        trackSub.textContent = `${em.charAt(0).toUpperCase() + em.slice(1)} · BrainDance`;
         if (audioElement) {
-            audioElement.src = song.file; audioElement.load();
+            audioElement.src = song.file;
+            audioElement.load();
             if (isPlaying) await audioElement.play().catch(e => console.warn(e));
         }
         progressFill.style.width = '0%';
@@ -706,9 +687,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = analyser
                 ? (() => { const b = new Uint8Array(analyser.frequencyBinCount); analyser.getByteFrequencyData(b); return b; })()
                 : getSimulatedData(64);
-            if (currentVisMode === 'bar' && barCtx && barCanvas && barCanvas.width > 0) { barCtx.clearRect(0, 0, barCanvas.width, barCanvas.height); drawCenteredBars(data, barCanvas.width, barCanvas.height, barCtx, rgb); }
-            else if (currentVisMode === 'radial' && radialCtx && radialCanvas && radialCanvas.width > 0)
+            if (currentVisMode === 'bar' && barCtx && barCanvas && barCanvas.width > 0) {
+                barCtx.clearRect(0, 0, barCanvas.width, barCanvas.height);
+                drawCenteredBars(data, barCanvas.width, barCanvas.height, barCtx, rgb);
+            } else if (currentVisMode === 'radial' && radialCtx && radialCanvas && radialCanvas.width > 0) {
                 drawRadialSpectrum(data, radialCtx, radialCanvas.width, radialCanvas.height, rgb);
+            }
         }
         animate();
     }
@@ -722,8 +706,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.type === 'status' && data.status === 'calibrating') {
             const pct = Math.round((data.progress || 0) * 100);
             showCalibBar(data.progress || 0);
-
-            // FIX: detect calibration completion (progress === 1.0)
             if ((data.progress || 0) >= 1.0) {
                 hideCalibBar();
                 setConnectionState(
@@ -741,7 +723,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        if (data.type === 'eeg_window') return;   // raw signal — ignore on frontend
+        if (data.type === 'eeg_window') return;
 
         if (data.type === 'emotion') {
             hideCalibBar();
@@ -819,8 +801,6 @@ document.addEventListener('DOMContentLoaded', () => {
         await Promise.all(SUPPORTED_EMOTIONS.map(em => fetchSongsForEmotion(em)));
 
         updateEmotionColors('calm', null);
-        updateBandBars(null, 'calm');
-
         setVisualizerMode('bar');
         startVisualizerLoop();
         connectEmotionSocket();

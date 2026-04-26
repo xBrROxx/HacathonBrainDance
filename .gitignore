@@ -4,6 +4,7 @@ recordings/
 node_modules/
 npm-debug.log*
 
+eeg/*.jsonl
 # Python
 venv/
 __pycache__/
@@ -15,6 +16,9 @@ eeg/*.jsonl
 # Environment variables
 .env
 
+eeg/emotion_predictions.jsonl
 # OS
 .DS_Store
 Thumbs.db
+
+music/

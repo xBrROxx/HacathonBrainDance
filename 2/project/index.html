@@ -26,8 +26,9 @@
             <div class="connect-icon">🧠</div>
             <div>
                 <strong>Cortex API</strong> — <span id="wsStatus">WebSocket not connected</span><br>
-                <span id="modeNote">Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below to simulate EEG
-                input.</span>
+                <span id="modeNote">Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below
+                    to simulate EEG
+                    input.</span>
             </div>
             <button class="connect-btn" id="reconnectBtn">Connect EPOC X</button>
         </div>
@@ -49,55 +50,9 @@
             </div>
         </div>
 
-        <div class="section-title">Brainwave Bands (μV²/Hz)</div>
-        <div class="waves-row">
-            <div class="wave-box">
-                <div class="wave-name">DELTA</div>
-                <div class="wave-val" id="wDelta">0.0</div>
-                <div class="wave-bar">
-                    <div class="wave-fill" id="wDeltaBar" style="width:0%;background:#7e57c2"></div>
-                </div>
-            </div>
-            <div class="wave-box">
-                <div class="wave-name">THETA</div>
-                <div class="wave-val" id="wTheta">0.0</div>
-                <div class="wave-bar">
-                    <div class="wave-fill" id="wThetaBar" style="width:0%;background:#4fc3f7"></div>
-                </div>
-            </div>
-            <div class="wave-box">
-                <div class="wave-name">ALPHA</div>
-                <div class="wave-val" id="wAlpha">0.0</div>
-                <div class="wave-bar">
-                    <div class="wave-fill" id="wAlphaBar" style="width:0%;background:#66bb6a"></div>
-                </div>
-            </div>
-            <div class="wave-box">
-                <div class="wave-name">BETA</div>
-                <div class="wave-val" id="wBeta">0.0</div>
-                <div class="wave-bar">
-                    <div class="wave-fill" id="wBetaBar" style="width:0%;background:#ffd54f"></div>
-                </div>
-            </div>
-            <div class="wave-box">
-                <div class="wave-name">GAMMA</div>
-                <div class="wave-val" id="wGamma">0.0</div>
-                <div class="wave-bar">
-                    <div class="wave-fill" id="wGammaBar" style="width:0%;background:#ef5350"></div>
-                </div>
-            </div>
-        </div>
-
         <!-- Centered emotion grid -->
         <div class="section-title">Detected Emotion (Simulate EEG)</div>
         <div class="emotions-grid" id="emotionGrid"></div>
-
-        <div class="intensity-row">
-            <div class="intensity-label"><span>Emotion Intensity</span><span id="intensityVal">50%</span></div>
-            <div class="intensity-track">
-                <div class="intensity-fill" id="intensityFill"></div>
-            </div>
-        </div>
 
         <div class="player">
             <div class="section-title">Now Playing</div>
