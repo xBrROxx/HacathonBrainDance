@@ -309,6 +309,7 @@ async def handler(websocket):
 
 async def broadcast(message):
     """Broadcast message to all connected clients."""
+    global clients
     if not clients:
         return
     dead = set()
@@ -319,7 +320,29 @@ async def broadcast(message):
             dead.add(c)
     clients -= dead
 
-
+async def tail_jsonl_and_broadcast(filepath):
+    """Watch emotion_predictions.jsonl and forward every new line to browser clients."""
+    import os
+    while not os.path.exists(filepath):
+        print(f"[TAIL] Waiting for {filepath}…")
+        await asyncio.sleep(1)
+    print(f"[TAIL] Watching {filepath}")
+    with open(filepath, "r") as f:
+        f.seek(0, 2)  # jump to end, skip old entries
+        while True:
+            line = f.readline()
+            if line:
+                line = line.strip()
+                if line:
+                    try:
+                        payload = json.loads(line)
+                        await broadcast(json.dumps(payload))
+                        print(f"[TAIL] → {payload.get('type')} / {payload.get('emotion', payload.get('status', ''))}")
+                    except json.JSONDecodeError:
+                        pass
+            else:
+                await asyncio.sleep(0.1)
+                
 def broadcast_payload(payload, loop):
     """Threadsafe broadcast from EEG thread."""
     asyncio.run_coroutine_threadsafe(
@@ -575,7 +598,8 @@ def start_lsl(loop):
         return
 
     print("[LSL] Searching for EEG stream…")
-    streams = pylsl.resolve_streams(pred="type='EEG'")
+    streams = pylsl.resolve_byprop('type', 'EEG', timeout=5)
+
     if not streams:
         print("[LSL] No EEG stream found. Enable LSL in EmotivPRO.")
         return
@@ -585,12 +609,13 @@ def start_lsl(loop):
     ch_count = info.channel_count()
     print(f"[LSL] Connected to '{info.name()}' ({ch_count} channels)")
 
-    # Extract channel names from metadata
+# Extract channel names from metadata
     ch_list = []
+    ch = info.desc().child("channels").child("channel")
     for i in range(ch_count):
-        ch = info.desc().child_value_n("channel", i)
-        label = ch.child_value("label") if ch else f"Ch{i}"
-        ch_list.append(label)
+        label = ch.child_value("label")
+        ch_list.append(label if label else f"Ch{i}")
+        ch = ch.next_sibling("channel")
     set_eeg_columns(ch_list)
 
     # Read stream
@@ -630,6 +655,9 @@ async def main():
     # Start WebSocket server
     async with websockets.serve(handler, WS_SERVER_HOST, WS_SERVER_PORT):
         print(f"[SERVER] Broadcasting on ws://{WS_SERVER_HOST}:{WS_SERVER_PORT}")
+# Bridge: tail JSONL file → broadcast to browser
+        jsonl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emotion_predictions.jsonl")
+        asyncio.create_task(tail_jsonl_and_broadcast(jsonl_path))
         await asyncio.Future()
 
 

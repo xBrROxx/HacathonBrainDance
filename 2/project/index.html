@@ -26,8 +26,8 @@
             <div class="connect-icon">🧠</div>
             <div>
                 <strong>Cortex API</strong> — <span id="wsStatus">WebSocket not connected</span><br>
-                Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below to simulate EEG
-                input.
+                <span id="modeNote">Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below to simulate EEG
+                input.</span>
             </div>
             <button class="connect-btn" id="reconnectBtn">Connect EPOC X</button>
         </div>
@@ -111,9 +111,9 @@
             </div>
             <div class="controls">
                 <button class="ctrl-btn" id="prevBtn">⏮</button>
-                <button class="ctrl-btn" id="rewindBtn">-10</button>
+                <button class="ctrl-btn" id="rewindBtn">⏪</button>
                 <button class="play-btn" id="playBtn">▶</button>
-                <button class="ctrl-btn" id="forwardBtn">+10</button>
+                <button class="ctrl-btn" id="forwardBtn">⏩</button>
                 <button class="ctrl-btn" id="nextBtn">⏭</button>
             </div>
             <div class="progress-row">
