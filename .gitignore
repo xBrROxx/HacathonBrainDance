@@ -1,4 +1,20 @@
-# Node.js modules
-node_modules/
-
 recordings/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# EEG data (VERY IMPORTANT for you)
+eeg/*.jsonl
+
+# Environment variables
+.env
+
+# OS
+.DS_Store
+Thumbs.db
