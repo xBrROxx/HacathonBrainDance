@@ -1,54 +1,81 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // ================= CONFIGURATION =================
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  CONFIGURATION
+    // ═══════════════════════════════════════════════════════════════════
     const API_BASE_URL = '/api/songs';
+    const EEG_WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname || 'localhost'}:8765`;
+    const WS_RECONNECT_DELAY_MS = 3000;
 
+    // Auto-play: wait this many ms after first detecting an emotion before
+    // starting music (gives the user a moment to see what was detected).
+    const AUTOPLAY_DELAY_MS = 3000;
+
+    // Stability: keep a rolling window of the last N emotion readings.
+    // Only switch emotion if the new one wins a majority of that window.
+    const HISTORY_SIZE = 10;
+    const MAJORITY_THRESHOLD = 6;   // out of 10 must agree to switch
+
+    // Minimum confidence to count a reading at all
+    const MIN_CONFIDENCE = 0.62;
+
+    // After switching emotion, lock for this long before allowing another switch
+    const SWITCH_LOCK_MS = 10000;
+
+    // ── Emotion presets ───────────────────────────────────────────────
     const EMOTION_PRESETS = {
-        calm: { color: '#4fc3f7', waves: { delta: 12, theta: 35, alpha: 80, beta: 20, gamma: 8 }, intensity: 65, visStyle: 'smooth' },
-        happy: { color: '#ffd54f', waves: { delta: 5, theta: 15, alpha: 40, beta: 60, gamma: 35 }, intensity: 82, visStyle: 'bouncy' },
-        angry: { color: '#ef5350', waves: { delta: 3, theta: 8, alpha: 12, beta: 85, gamma: 70 }, intensity: 91, visStyle: 'spiky' },
-        sad: { color: '#7e57c2', waves: { delta: 20, theta: 45, alpha: 25, beta: 30, gamma: 10 }, intensity: 58, visStyle: 'slow' },
-        focused: { color: '#66bb6a', waves: { delta: 4, theta: 20, alpha: 65, beta: 55, gamma: 30 }, intensity: 75, visStyle: 'steady' }
+        calm: { color: '#4fc3f7', intensity: 65 },
+        happy: { color: '#ffd54f', intensity: 82 },
+        angry: { color: '#ef5350', intensity: 91 },
+        sad: { color: '#7e57c2', intensity: 58 },
+        focused: { color: '#66bb6a', intensity: 75 },
     };
+    const SUPPORTED_EMOTIONS = Object.keys(EMOTION_PRESETS);
 
+    // ═══════════════════════════════════════════════════════════════════
+    //  STATE
+    // ═══════════════════════════════════════════════════════════════════
     let songCache = { calm: [], happy: [], angry: [], sad: [], focused: [] };
+    let currentEmotion = null;
+    let currentTrackFile = null;
+    let isPlaying = false;
+    let audioElement = null;
+    let audioContext = null;
+    let analyser = null;
+    let audioSource = null;
+    let animationId = null;
+    let progressInterval = null;
+    let simPhase = 0;
+    let emotionSocket = null;
+    let reconnectTimer = null;
+    let socketConnected = false;
+    let currentVisMode = 'bar';
+    let barCtx = null;
+    let radialCtx = null;
+    let globeRotation = 0;
+    let spikePhase = 0;
 
-    async function fetchSongsForEmotion(emotion) {
-        try {
-            const response = await fetch(`${API_BASE_URL}/${emotion}`);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const songs = await response.json();
-            songCache[emotion] = songs.filter(f => f.toLowerCase().endsWith('.mp3'));
-            return songCache[emotion];
-        } catch (error) {
-            console.error(`Failed to fetch ${emotion}:`, error);
-            songCache[emotion] = [];
-            return [];
-        }
-    }
+    // Stability tracking
+    let emotionHistory = [];
+    let switchLockedUntil = 0;
+    let autoPlayTimer = null;
+    let pendingEmotion = null;
+    let pendingAutoplay = false;
 
-    function getRandomSong(emotion) {
-        const songs = songCache[emotion];
-        if (!songs || songs.length === 0) return null;
-        const randomIndex = Math.floor(Math.random() * songs.length);
-        const fileName = songs[randomIndex];
-        const fullPath = `music/${emotion}/${fileName}`;
-        const display = fileName.replace(/\.mp3$/i, '').replace(/_/g, ' ');
-        return { file: fullPath, name: display, emoji: getEmojiForEmotion(emotion) };
-    }
+    // Last received features and confidence
+    let liveFeatures = null;
+    let liveConfidence = null;
 
-    function getEmojiForEmotion(emotion) {
-        const map = { calm: '🌊', happy: '☀️', angry: '🔥', sad: '🌧️', focused: '🎯' };
-        return map[emotion] || '🎵';
-    }
-
-    // ================= DOM ELEMENTS =================
+    // ═══════════════════════════════════════════════════════════════════
+    //  DOM
+    // ═══════════════════════════════════════════════════════════════════
     const flash = document.getElementById('flash');
     const root = document.documentElement;
     const appTitle = document.getElementById('appTitle');
     const eegDot = document.getElementById('eegDot');
     const eegStatus = document.getElementById('eegStatus');
-    const intensityVal = document.getElementById('intensityVal');
-    const intensityFill = document.getElementById('intensityFill');
+    const wsStatusSpan = document.getElementById('wsStatus');
+    const modeNote = document.getElementById('modeNote');
     const trackName = document.getElementById('trackName');
     const trackSub = document.getElementById('trackSub');
     const albumArt = document.getElementById('albumArt');
@@ -63,311 +90,367 @@ document.addEventListener('DOMContentLoaded', () => {
     const rewindBtn = document.getElementById('rewindBtn');
     const forwardBtn = document.getElementById('forwardBtn');
     const reconnectBtn = document.getElementById('reconnectBtn');
-    const wsStatusSpan = document.getElementById('wsStatus');
     const toggleBtn = document.getElementById('toggleVisBtn');
-
-    // Visualizer canvases
     const barCanvas = document.getElementById('visBar');
     const radialCanvas = document.getElementById('visRadial');
-    let barCtx = null;
-    let radialCtx = null;
-    let currentVisMode = 'bar';
 
-    // Audio state
-    let currentEmotion = 'calm';
-    let currentTrackFile = null;
-    let currentTrackDisplayName = '';
-    let isPlaying = false;
-    let audioElement = null;
-    let audioContext = null;
-    let analyser = null;
-    let source = null;
-    let animationId = null;
-    let progressInterval = null;
-    let simPhase = 0;
+    // ── Live EEG data panel ───────────────────────────────────────────
+    let eegDataPanel = null;
 
-    // ================= VISUALIZER TOGGLE & SIZING =================
-    function setVisualizerMode(mode) {
-        currentVisMode = mode;
-        if (mode === 'bar') {
-            barCanvas.classList.add('active');
-            radialCanvas.classList.remove('active');
-            toggleBtn.textContent = 'Switch to Radial View';
-            requestAnimationFrame(() => {
-                resizeBarCanvas();
-                barCtx = barCanvas.getContext('2d');
+    function buildEegDataPanel() {
+        const existing = document.getElementById('eegDataPanel');
+        if (existing) { eegDataPanel = existing; return; }
+
+        eegDataPanel = document.createElement('div');
+        eegDataPanel.id = 'eegDataPanel';
+        eegDataPanel.style.cssText = `
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 12px;
+            padding: 16px 20px;
+            margin: 12px 0;
+            display: none;
+            font-family: monospace;
+        `;
+        eegDataPanel.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <span style="font-size:11px; letter-spacing:2px; color:rgba(255,255,255,0.4); text-transform:uppercase;">Live EEG Signal</span>
+                <span id="liveConfBadge" style="
+                    font-size:12px; font-weight:bold; padding:3px 10px;
+                    border-radius:20px; background:rgba(255,255,255,0.08);
+                    color:#fff; letter-spacing:1px;
+                ">CONF —</span>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                ${['alpha', 'beta', 'theta', 'gamma'].map(band => `
+                <div>
+                    <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                        <span style="font-size:11px; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:1px;">${band}</span>
+                        <span id="live_${band}_val" style="font-size:12px; font-weight:bold; color:#fff;">—</span>
+                    </div>
+                    <div style="background:rgba(255,255,255,0.08); border-radius:4px; height:5px; overflow:hidden;">
+                        <div id="live_${band}_bar" style="height:100%; width:0%; border-radius:4px; transition:width 0.6s ease;
+                            background:${{ alpha: '#66bb6a', beta: '#ffd54f', theta: '#4fc3f7', gamma: '#ef5350' }[band]};"></div>
+                    </div>
+                </div>`).join('')}
+            </div>
+            <div style="margin-top:12px; display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:rgba(255,255,255,0.4); text-transform:uppercase; letter-spacing:1px;">Confidence</span>
+                <span id="liveConfPct" style="font-size:12px; font-weight:bold; color:#fff;">—</span>
+            </div>
+
+            <div style="margin-top:14px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.07);">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-size:11px; color:rgba(255,255,255,0.4); text-transform:uppercase; letter-spacing:1px;">Emotion History</span>
+                    <span id="historyVote" style="font-size:11px; color:rgba(255,255,255,0.5);">—</span>
+                </div>
+                <div id="historyDots" style="display:flex; gap:5px; margin-top:8px; flex-wrap:wrap;"></div>
+            </div>
+        `;
+
+        const eegBar = document.querySelector('.eeg-bar');
+        if (eegBar) eegBar.insertAdjacentElement('afterend', eegDataPanel);
+        else document.querySelector('.container').appendChild(eegDataPanel);
+    }
+
+    function updateEegDataPanel(features, confidence, emotion) {
+        if (!eegDataPanel) return;
+        eegDataPanel.style.display = 'block';
+
+        const preset = EMOTION_PRESETS[emotion] || EMOTION_PRESETS['calm'];
+        const color = preset.color;
+
+        ['alpha', 'beta', 'theta', 'gamma'].forEach(band => {
+            const val = features && typeof features[band] === 'number' ? features[band] : 0;
+            const pct = Math.round(val * 100);
+            const valEl = document.getElementById(`live_${band}_val`);
+            const barEl = document.getElementById(`live_${band}_bar`);
+            if (valEl) valEl.textContent = val.toFixed(3);
+            if (barEl) barEl.style.width = pct + '%';
+        });
+
+        const confPct = Math.round((confidence || 0) * 100);
+        const confBadge = document.getElementById('liveConfBadge');
+        const confPctEl = document.getElementById('liveConfPct');
+        if (confBadge) {
+            confBadge.textContent = `CONF ${confPct}%`;
+            confBadge.style.background = color + '33';
+            confBadge.style.color = color;
+        }
+        if (confPctEl) confPctEl.textContent = confPct + '%';
+
+        updateHistoryDots();
+    }
+
+    function updateHistoryDots() {
+        const dotsEl = document.getElementById('historyDots');
+        const voteEl = document.getElementById('historyVote');
+        if (!dotsEl) return;
+
+        dotsEl.innerHTML = '';
+        const counts = {};
+        emotionHistory.forEach(e => { counts[e] = (counts[e] || 0) + 1; });
+        const winner = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+
+        emotionHistory.forEach(e => {
+            const dot = document.createElement('div');
+            const color = EMOTION_PRESETS[e] ? EMOTION_PRESETS[e].color : '#888';
+            dot.title = e;
+            dot.style.cssText = `
+                width:10px; height:10px; border-radius:50%;
+                background:${color}; opacity:0.85;
+                transition:transform 0.2s;
+            `;
+            dotsEl.appendChild(dot);
+        });
+
+        for (let i = emotionHistory.length; i < HISTORY_SIZE; i++) {
+            const dot = document.createElement('div');
+            dot.style.cssText = `
+                width:10px; height:10px; border-radius:50%;
+                background:rgba(255,255,255,0.1);
+            `;
+            dotsEl.appendChild(dot);
+        }
+
+        if (voteEl && winner) {
+            voteEl.textContent = `${winner[0]} ${winner[1]}/${HISTORY_SIZE}`;
+            voteEl.style.color = EMOTION_PRESETS[winner[0]] ? EMOTION_PRESETS[winner[0]].color : '#fff';
+        }
+    }
+
+    // ── Calibration bar ───────────────────────────────────────────────
+    const calibBanner = document.querySelector('.connect-banner');
+    let calibBarWrap = null, calibBarFill = null;
+
+    function ensureCalibBar() {
+        if (calibBarWrap) return;
+        calibBarWrap = document.createElement('div');
+        calibBarWrap.style.cssText = `
+            width:100%; margin-top:8px; display:none;
+            background:rgba(255,255,255,0.08); border-radius:4px; height:6px; overflow:hidden;
+        `;
+        calibBarFill = document.createElement('div');
+        calibBarFill.style.cssText = `
+            height:100%; width:0%; background:#4fc3f7;
+            border-radius:4px; transition:width 0.5s ease;
+        `;
+        calibBarWrap.appendChild(calibBarFill);
+        if (calibBanner) calibBanner.appendChild(calibBarWrap);
+    }
+
+    function showCalibBar(progress) {
+        ensureCalibBar();
+        calibBarWrap.style.display = 'block';
+        calibBarFill.style.width = Math.round(progress * 100) + '%';
+    }
+
+    function hideCalibBar() {
+        if (calibBarWrap) calibBarWrap.style.display = 'none';
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  SONG CACHE
+    // ═══════════════════════════════════════════════════════════════════
+    async function fetchSongsForEmotion(emotion) {
+        try {
+            const res = await fetch(`${API_BASE_URL}/${emotion}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const songs = await res.json();
+            songCache[emotion] = songs.filter(f => f.toLowerCase().endsWith('.mp3'));
+            return songCache[emotion];
+        } catch (e) {
+            console.error(`Failed to fetch ${emotion}:`, e);
+            songCache[emotion] = [];
+            return [];
+        }
+    }
+
+    async function ensureSongs(emotion) {
+        if (!SUPPORTED_EMOTIONS.includes(emotion)) return [];
+        if (songCache[emotion] && songCache[emotion].length > 0) return songCache[emotion];
+        return fetchSongsForEmotion(emotion);
+    }
+
+    function getRandomSong(emotion) {
+        const songs = songCache[emotion];
+        if (!songs || songs.length === 0) return null;
+        const idx = Math.floor(Math.random() * songs.length);
+        const fileName = songs[idx];
+        return {
+            file: `music/${emotion}/${fileName}`,
+            name: fileName.replace(/\.mp3$/i, '').replace(/[-_]/g, ' '),
+            emoji: { calm: '🌊', happy: '☀️', angry: '🔥', sad: '🌧️', focused: '🎯' }[emotion] || '🎵',
+        };
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  STABILITY — majority vote over rolling history
+    // ═══════════════════════════════════════════════════════════════════
+    function pushToHistory(emotion) {
+        emotionHistory.push(emotion);
+        if (emotionHistory.length > HISTORY_SIZE) emotionHistory.shift();
+    }
+
+    function getMajorityEmotion() {
+        if (emotionHistory.length === 0) return null;
+        const counts = {};
+        emotionHistory.forEach(e => { counts[e] = (counts[e] || 0) + 1; });
+        const [winner, votes] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+        return votes >= MAJORITY_THRESHOLD ? winner : null;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  EMOTION HANDLING
+    // ═══════════════════════════════════════════════════════════════════
+    async function handleEmotionMessage(data) {
+        const emotion = typeof data.emotion === 'string' ? data.emotion.toLowerCase() : '';
+        const confidence = typeof data.confidence === 'number' ? data.confidence : 0;
+        const features = data.features || null;
+
+        if (!SUPPORTED_EMOTIONS.includes(emotion)) return;
+        if (confidence < MIN_CONFIDENCE) return;
+
+        liveFeatures = features;
+        liveConfidence = confidence;
+        updateEegDataPanel(features, confidence, emotion);
+
+        pushToHistory(emotion);
+
+        const majorityEmotion = getMajorityEmotion();
+
+        if (!majorityEmotion) {
+            updateEmotionColors(emotion, confidence);
+            setConnectionState(
+                `Reading: ${emotion} (${Math.round(confidence * 100)}%)`,
+                `Analyzing patterns… <strong style="color:${EMOTION_PRESETS[emotion].color}">${emotion}</strong> detected — building consensus (${emotionHistory.length}/${HISTORY_SIZE})`,
+                'LIVE'
+            );
+            return;
+        }
+
+        if (majorityEmotion === currentEmotion && isPlaying) {
+            updateEmotionColors(majorityEmotion, confidence);
+            setConnectionState(
+                `Live: ${majorityEmotion} (${Math.round(confidence * 100)}%)`,
+                `Live EEG active — <strong style="color:${EMOTION_PRESETS[majorityEmotion].color}">${majorityEmotion}</strong> detected consistently.`,
+                'LIVE'
+            );
+            return;
+        }
+
+        const now = Date.now();
+        if (majorityEmotion !== currentEmotion && now < switchLockedUntil) return;
+
+        if (majorityEmotion !== pendingEmotion) {
+            pendingEmotion = majorityEmotion;
+            if (autoPlayTimer) clearTimeout(autoPlayTimer);
+
+            let songs = await ensureSongs(majorityEmotion);
+            if (!songs || songs.length === 0) {
+                const fallback = SUPPORTED_EMOTIONS.find(e => songCache[e] && songCache[e].length > 0);
+                if (!fallback) return;
+                songs = songCache[fallback];
+            }
+
+            updateEmotionColors(majorityEmotion, confidence);
+
+            // Stage the new song WITHOUT updating currentEmotion yet
+            const song = getRandomSong(majorityEmotion);
+            if (song) {
+                currentTrackFile = song.file;
+                trackName.textContent = song.name;
+                albumArt.textContent = song.emoji;
+                trackSub.textContent = `${majorityEmotion.charAt(0).toUpperCase() + majorityEmotion.slice(1)} · BrainDance`;
+                if (audioElement) { audioElement.src = song.file; audioElement.load(); }
+            }
+
+            setConnectionState(
+                `Detected: ${majorityEmotion} (${Math.round(confidence * 100)}%)`,
+                `<strong style="color:${EMOTION_PRESETS[majorityEmotion].color}">${majorityEmotion.toUpperCase()}</strong> confirmed — music starts in ${AUTOPLAY_DELAY_MS / 1000}s…`,
+                'LIVE'
+            );
+
+            autoPlayTimer = setTimeout(async () => {
+                const stillMajority = getMajorityEmotion();
+                if (stillMajority !== majorityEmotion) return;
+
+                // NOW commit the emotion change and start the correct music
+                currentEmotion = majorityEmotion;
+                switchLockedUntil = Date.now() + SWITCH_LOCK_MS;
+                pendingEmotion = null;
+                playCurrentSong();
+
+                setConnectionState(
+                    `Live: ${majorityEmotion} (${Math.round(confidence * 100)}%)`,
+                    `Live EEG active — <strong style="color:${EMOTION_PRESETS[majorityEmotion].color}">${majorityEmotion}</strong> is playing.`,
+                    'LIVE'
+                );
+            }, AUTOPLAY_DELAY_MS);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  UI UPDATES
+    // ═══════════════════════════════════════════════════════════════════
+    function updateEmotionColors(emotion, confidence) {
+        const preset = EMOTION_PRESETS[emotion];
+        if (!preset) return;
+        root.style.setProperty('--current', preset.color);
+        appTitle.style.color = preset.color;
+        appTitle.style.textShadow = `0 0 30px ${preset.color}`;
+        eegDot.style.background = preset.color;
+        eegStatus.style.color = preset.color;
+
+        document.querySelectorAll('.emotion-btn').forEach(btn =>
+            btn.classList.toggle('active', btn.dataset.emotion === emotion)
+        );
+        flash.style.opacity = '0.08';
+        setTimeout(() => flash.style.opacity = '0', 150);
+    }
+
+    function setConnectionState(statusText, modeHtml, eegLabel) {
+        if (wsStatusSpan && statusText) wsStatusSpan.textContent = statusText;
+        if (modeNote && modeHtml) modeNote.innerHTML = modeHtml;
+        if (eegStatus && eegLabel) eegStatus.textContent = eegLabel;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  EMOTION GRID (manual simulation buttons)
+    // ═══════════════════════════════════════════════════════════════════
+    function buildEmotionGrid() {
+        const emojiMap = { calm: '😌', happy: '😄', angry: '😤', sad: '😢', focused: '🧘' };
+        SUPPORTED_EMOTIONS.forEach(em => {
+            const btn = document.createElement('button');
+            btn.className = 'emotion-btn';
+            btn.dataset.emotion = em;
+            btn.style.setProperty('--e-color', EMOTION_PRESETS[em].color);
+            btn.innerHTML = `<span class="emoji">${emojiMap[em]}</span><span class="name">${em.charAt(0).toUpperCase() + em.slice(1)}</span>`;
+            btn.addEventListener('click', async () => {
+                if (autoPlayTimer) clearTimeout(autoPlayTimer);
+                pendingEmotion = null;
+                const songs = await ensureSongs(em);
+                if (!songs || songs.length === 0) return;
+
+                // Fully commit the emotion switch immediately on manual click
+                currentEmotion = em;
+                updateEmotionColors(em, null);
+                setCurrentSong(em);   // sets currentTrackFile, trackName, albumArt
+                playCurrentSong();
+
+                setConnectionState(
+                    `Manual: ${em}`,
+                    `Simulation mode — <strong style="color:${EMOTION_PRESETS[em].color}">${em}</strong> selected manually.`,
+                    'SIMULATED'
+                );
             });
-        } else {
-            barCanvas.classList.remove('active');
-            radialCanvas.classList.add('active');
-            toggleBtn.textContent = 'Switch to Bar View';
-            resizeRadialCanvas();
-            radialCtx = radialCanvas.getContext('2d');
-        }
+            emotionGrid.appendChild(btn);
+        });
     }
 
-    function resizeBarCanvas() {
-        if (!barCanvas) return;
-        const w = barCanvas.offsetWidth || barCanvas.parentElement.clientWidth;
-        if (w > 0) {
-            barCanvas.width = w;
-            barCanvas.height = 300;
-            barCtx = barCanvas.getContext('2d');
-        }
-    }
-
-    function resizeRadialCanvas() {
-        if (!radialCanvas) return;
-        radialCanvas.width = 560;
-        radialCanvas.height = 560;
-        radialCtx = radialCanvas.getContext('2d');
-    }
-
-    // ================= VISUALIZER DRAWING =================
-    function drawCenteredBars(dataArray, width, height, ctx, colorRgb) {
-        const bufferLength = dataArray.length;
-        const barWidth = width / (bufferLength * 2);
-        const centerX = width / 2;
-        for (let i = 0; i < bufferLength; i++) {
-            const value = dataArray[i] / 255;
-            const barHeight = Math.max(2, value * height * 0.7);
-            const xLeft = centerX - (i + 1) * barWidth;
-            const xRight = centerX + i * barWidth;
-            ctx.fillStyle = `rgba(${colorRgb.r},${colorRgb.g},${colorRgb.b},${0.5 + value * 0.5})`;
-            ctx.fillRect(xLeft, height - barHeight, barWidth - 1, barHeight);
-            ctx.fillRect(xRight, height - barHeight, barWidth - 1, barHeight);
-        }
-    }
-
-    // ── Globe state ───────────────────────────────────────────────────────────
-    let globeRotation = 0;
-    let spikePhase = 0; // drives the up/down breathing animation
-
-    function drawRadialSpectrum(dataArray, ctx, width, height, colorRgb) {
-        const cx = width / 2;
-        const cy = height / 2;
-        const maxR = Math.min(width, height) / 2 - 16;
-        const bufLen = dataArray.length;
-        const c = `${colorRgb.r},${colorRgb.g},${colorRgb.b}`;
-        const avgVal = dataArray.reduce((s, v) => s + v, 0) / bufLen / 255;
-
-        // ── Reset shadow & clear ──────────────────────────────────────────
-        ctx.shadowBlur = 0;
-        ctx.shadowColor = 'transparent';
-        ctx.clearRect(0, 0, width, height);
-
-        // ── Clip everything to circle ─────────────────────────────────────
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(cx, cy, maxR, 0, Math.PI * 2);
-        ctx.clip();
-
-        // ── 1. Clean dark background ──────────────────────────────────────
-        ctx.fillStyle = 'rgba(6,6,16,1)';
-        ctx.fillRect(0, 0, width, height);
-
-        // ── 2. Latitude lines ─────────────────────────────────────────────
-        const latLines = 7;
-        for (let l = 1; l < latLines; l++) {
-            const t = l / latLines;
-            const lat = (t - 0.5) * Math.PI;
-            const cosLat = Math.cos(lat);
-            const projY = cy + maxR * Math.sin(lat);
-            const projRx = maxR * cosLat;
-            const projRy = projRx * 0.18;
-            const alpha = 0.06 + cosLat * 0.10;
-            ctx.beginPath();
-            ctx.ellipse(cx, projY, projRx, projRy, 0, 0, Math.PI * 2);
-            ctx.strokeStyle = `rgba(${c},${alpha})`;
-            ctx.lineWidth = 0.75;
-            ctx.stroke();
-        }
-
-        // ── 3. Longitude lines ────────────────────────────────────────────
-        const lonLines = 8;
-        for (let l = 0; l < lonLines; l++) {
-            const angle = (l / lonLines) * Math.PI + globeRotation;
-            const cosA = Math.cos(angle);
-            const facing = Math.abs(cosA);
-            const alpha = 0.05 + facing * 0.13;
-            ctx.beginPath();
-            ctx.ellipse(cx, cy, maxR * facing, maxR, 0, 0, Math.PI * 2);
-            ctx.strokeStyle = `rgba(${c},${alpha})`;
-            ctx.lineWidth = 0.75;
-            ctx.stroke();
-        }
-
-        // ── 4. Equator ring highlight ─────────────────────────────────────
-        ctx.beginPath();
-        ctx.ellipse(cx, cy, maxR, maxR * 0.18, 0, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(${c},0.22)`;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        // ── 5. Frequency spikes — true full-circle mirror ─────────────────
-        const spikeCount = 128;
-        const half = spikeCount / 2;
-        const equatorRy = maxR * 0.32;
-        const baseR = maxR * 0.72;  // pulled in to give spikes room
-        const maxSpike = maxR * 0.22; // 0.72 + 0.22 = 0.94 maxR — safely inside the circle
-        const breathAmp = maxR * 0.03;
-        const breathFreq = .6;
-        const breathSpeed = spikePhase;
-
-        // Trim: FFT bins above ~55% of bufLen are near-silent for music.
-        // Only sample the lower range where actual audio energy lives.
-        const usedBins = Math.ceil(bufLen * 0.55);
-
-        for (let i = 0; i < spikeCount; i++) {
-            // Mountain curve: low freq at 0°, rises to high at 180°, back to low at 360°.
-            // Spikes at +θ and -θ from 0° share the same halfIdx → perfect left-right mirror.
-            // High frequencies now sit on the true opposite side of the circle from the low.
-            const halfIdx = i <= half ? i : (spikeCount - i);
-            const dataIdx = Math.min(Math.floor((halfIdx / half) * usedBins), usedBins - 1);
-
-            // Lift the floor so quiet frequencies still show
-            const value = Math.pow(dataArray[dataIdx] / 255, 0.45);
-
-            // Spike angle rotates with globe for 3D spin
-            const angle = (i / spikeCount) * Math.PI * 2 + globeRotation;
-            const cosA = Math.cos(angle);
-            const sinA = Math.sin(angle);
-
-            // 3D depth: front spikes full size, back spikes shrink
-            const depth3d = 0.4 + (cosA + 1) * 0.3; // 0.4 → 1.0
-
-            // Base position on equator ellipse
-            const baseX = cx + baseR * cosA;
-            const baseY = cy + baseR * sinA * (equatorRy / maxR);
-
-            // Use true outward normal from the sphere centre
-            const nx = cosA;
-            const ny = sinA * (equatorRy / maxR);
-            const nLen = Math.sqrt(nx * nx + ny * ny) || 1;
-
-            const spikeLen = (0.08 + value * 0.92) * maxSpike * depth3d;
-
-            // Tip = base + normalized outward * spike length
-            const tipX = baseX + (nx / nLen) * spikeLen;
-            const tipY = baseY + (ny / nLen) * spikeLen;
-
-            // Breathing — keyed on halfIdx so opposite spikes ripple identically
-            const waveOffset = (halfIdx / half) * Math.PI * 2 * breathFreq;
-            const breathShift = Math.sin(breathSpeed + waveOffset) * breathAmp;
-
-            const finalTipY = tipY + breathShift;
-            const finalBaseY = baseY + breathShift * 0.3;
-
-            const alpha = 0.65 + value * 0.35;
-            const lineW = (2.0 + value * 5.0) * depth3d;
-
-            ctx.beginPath();
-            ctx.moveTo(baseX, finalBaseY);
-            ctx.lineTo(tipX, finalTipY);
-            ctx.lineWidth = lineW;
-            ctx.strokeStyle = `rgba(${c},${alpha})`;
-            ctx.shadowColor = `rgb(${c})`;
-            ctx.shadowBlur = value > 0.5 ? 10 : 4;
-            ctx.stroke();
-            ctx.shadowBlur = 0;
-            ctx.shadowColor = 'transparent';
-
-            // Glowing tip dot
-            if (value > 0.2) {
-                ctx.beginPath();
-                ctx.arc(tipX, finalTipY, 1.5 + value * 2.5 * depth3d, 0, Math.PI * 2);
-                ctx.fillStyle = `rgba(255,255,255,${value * depth3d * 0.95})`;
-                ctx.fill();
-            }
-        }
-        // ── 6. Dark vignette for 3D depth ────────────────────────────────
-        const vigGrad = ctx.createRadialGradient(cx, cy, maxR * 0.45, cx, cy, maxR);
-        vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
-        vigGrad.addColorStop(1, 'rgba(0,0,0,0.60)');
-        ctx.fillStyle = vigGrad;
-        ctx.fillRect(0, 0, width, height);
-
-        // ── 7. Pulsing centre core ────────────────────────────────────────
-        const coreSize = maxR * (0.055 + avgVal * 0.075);
-        const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreSize);
-        coreGrad.addColorStop(0, `rgba(255,255,255,${0.45 + avgVal * 0.45})`);
-        coreGrad.addColorStop(0.5, `rgba(${c},${0.2 + avgVal * 0.25})`);
-        coreGrad.addColorStop(1, `rgba(${c},0)`);
-        ctx.fillStyle = coreGrad;
-        ctx.beginPath();
-        ctx.arc(cx, cy, coreSize, 0, Math.PI * 2);
-        ctx.fill();
-
-        // ── End clip ──────────────────────────────────────────────────────
-        ctx.restore();
-
-        // ── 8. Outer rim glow (outside clip = always crisp) ──────────────
-        ctx.beginPath();
-        ctx.arc(cx, cy, maxR, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(${c},0.55)`;
-        ctx.lineWidth = 2.5;
-        ctx.shadowColor = `rgb(${c})`;
-        ctx.shadowBlur = 20;
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-        ctx.shadowColor = 'transparent';
-
-        // ── Advance animation state ───────────────────────────────────────
-        globeRotation += 0.007;
-        if (globeRotation > Math.PI * 2) globeRotation -= Math.PI * 2;
-
-        spikePhase += 0.045; // controls breathing speed — tweak freely
-        if (spikePhase > Math.PI * 200) spikePhase -= Math.PI * 200;
-    }
-
-    // ================= SIMULATED DATA (before AudioContext starts) ==========
-    function getSimulatedData(length) {
-        const arr = new Uint8Array(length);
-        simPhase += 0.05;
-        for (let i = 0; i < length; i++) {
-            arr[i] = Math.max(0, Math.min(255,
-                80 + 60 * Math.sin(simPhase + i * 0.3) +
-                50 * Math.sin(simPhase * 2.3 + i * 0.7)
-            ));
-        }
-        return arr;
-    }
-
-    // ================= VISUALIZER LOOP =====================================
-    function startVisualizerLoop() {
-        if (animationId) cancelAnimationFrame(animationId);
-
-        function animate() {
-            animationId = requestAnimationFrame(animate);
-            const colorHex = EMOTION_PRESETS[currentEmotion].color;
-            const rgb = hexToRgb(colorHex);
-
-            let dataArray;
-            if (analyser) {
-                const buf = new Uint8Array(analyser.frequencyBinCount);
-                analyser.getByteFrequencyData(buf);
-                dataArray = buf;
-            } else {
-                dataArray = getSimulatedData(64);
-            }
-
-            if (currentVisMode === 'bar' && barCtx && barCanvas) {
-                const w = barCanvas.width, h = barCanvas.height;
-                if (w > 0 && h > 0) {
-                    barCtx.clearRect(0, 0, w, h);
-                    drawCenteredBars(dataArray, w, h, barCtx, rgb);
-                }
-            } else if (currentVisMode === 'radial' && radialCtx && radialCanvas) {
-                const w = radialCanvas.width, h = radialCanvas.height;
-                if (w > 0 && h > 0) {
-                    drawRadialSpectrum(dataArray, radialCtx, w, h, rgb);
-                }
-            }
-        }
-        animate();
-    }
-
-    // ================= AUDIO SETUP =========================================
+    // ═══════════════════════════════════════════════════════════════════
+    //  AUDIO
+    // ═══════════════════════════════════════════════════════════════════
     function initAudio() {
         audioElement = new Audio();
         audioElement.crossOrigin = 'anonymous';
@@ -377,40 +460,31 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!isNaN(audioElement.duration))
                 timeDuration.textContent = formatTime(audioElement.duration);
         });
-
         document.body.addEventListener('click', () => {
             if (!audioContext) {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 analyser = audioContext.createAnalyser();
                 analyser.fftSize = 256;
-                source = audioContext.createMediaElementSource(audioElement);
-                source.connect(analyser);
+                audioSource = audioContext.createMediaElementSource(audioElement);
+                audioSource.connect(analyser);
                 analyser.connect(audioContext.destination);
             }
-            if (audioContext && audioContext.state === 'suspended') audioContext.resume();
+            if (audioContext.state === 'suspended') audioContext.resume();
+            if (pendingAutoplay) {
+                pendingAutoplay = false;
+                playCurrentSong();
+            }
         }, { once: true });
     }
 
-    function hexToRgb(hex) {
-        const r = parseInt(hex.slice(1, 3), 16);
-        const g = parseInt(hex.slice(3, 5), 16);
-        const b = parseInt(hex.slice(5, 7), 16);
-        return { r, g, b };
-    }
-
-    // ================= AUDIO PLAYBACK ======================================
     function setCurrentSong(emotion) {
         const song = getRandomSong(emotion);
         if (!song) return;
         currentTrackFile = song.file;
-        currentTrackDisplayName = song.name;
-        trackName.textContent = currentTrackDisplayName;
+        trackName.textContent = song.name;
         albumArt.textContent = song.emoji;
-        trackSub.textContent = `${emotion.charAt(0).toUpperCase() + emotion.slice(1)} · NeuroBeats`;
-        if (audioElement) {
-            audioElement.src = currentTrackFile;
-            audioElement.load();
-        }
+        trackSub.textContent = `${emotion.charAt(0).toUpperCase() + emotion.slice(1)} · BrainDance`;
+        if (audioElement) { audioElement.src = song.file; audioElement.load(); }
     }
 
     function playCurrentSong() {
@@ -419,11 +493,20 @@ document.addEventListener('DOMContentLoaded', () => {
             audioElement.src = currentTrackFile;
             audioElement.load();
         }
-        audioElement.play().catch(e => console.warn('Play error:', e));
-        isPlaying = true;
-        playBtn.textContent = '⏸';
-        playingTag.textContent = 'PLAYING';
-        startProgressUpdater();
+        audioElement.play()
+            .then(() => {
+                isPlaying = true;
+                playBtn.textContent = '⏸';
+                playingTag.textContent = 'PLAYING';
+                startProgressUpdater();
+            })
+            .catch(e => {
+                pendingAutoplay = true;
+                isPlaying = false;
+                playBtn.textContent = '▶';
+                playingTag.textContent = 'TAP TO ENABLE AUDIO';
+                console.warn('Play blocked:', e);
+            });
     }
 
     function pauseSong() {
@@ -435,45 +518,40 @@ document.addEventListener('DOMContentLoaded', () => {
         if (progressInterval) clearInterval(progressInterval);
     }
 
-    function togglePlay() {
-        if (isPlaying) pauseSong();
-        else playCurrentSong();
-    }
+    function togglePlay() { if (isPlaying) pauseSong(); else playCurrentSong(); }
 
     async function nextTrack() {
-        const song = getRandomSong(currentEmotion);
+        // Always use currentEmotion so the next track is from the correct folder
+        const em = currentEmotion || 'calm';
+        const song = getRandomSong(em);
         if (!song) return;
         currentTrackFile = song.file;
-        currentTrackDisplayName = song.name;
-        trackName.textContent = currentTrackDisplayName;
+        trackName.textContent = song.name;
         albumArt.textContent = song.emoji;
+        trackSub.textContent = `${em.charAt(0).toUpperCase() + em.slice(1)} · BrainDance`;
         if (audioElement) {
-            audioElement.src = currentTrackFile;
+            audioElement.src = song.file;
             audioElement.load();
             if (isPlaying) await audioElement.play().catch(e => console.warn(e));
         }
+        progressFill.style.width = '0%';
+        timeElapsed.textContent = '0:00';
+        timeDuration.textContent = '0:00';
     }
 
     function prevTrack() { nextTrack(); }
 
     function startProgressUpdater() {
         if (progressInterval) clearInterval(progressInterval);
-        progressInterval = setInterval(() => {
-            if (audioElement && audioElement.duration && !isNaN(audioElement.duration)) {
-                const percent = (audioElement.currentTime / audioElement.duration) * 100;
-                progressFill.style.width = percent + '%';
-                timeElapsed.textContent = formatTime(audioElement.currentTime);
-            }
-        }, 200);
+        progressInterval = setInterval(updateProgress, 200);
     }
 
     function updateProgress() {
-        if (audioElement && audioElement.duration && !isNaN(audioElement.duration)) {
-            const percent = (audioElement.currentTime / audioElement.duration) * 100;
-            progressFill.style.width = percent + '%';
-            timeElapsed.textContent = formatTime(audioElement.currentTime);
-            timeDuration.textContent = formatTime(audioElement.duration);
-        }
+        if (!audioElement || !audioElement.duration || isNaN(audioElement.duration)) return;
+        const pct = (audioElement.currentTime / audioElement.duration) * 100;
+        progressFill.style.width = pct + '%';
+        timeElapsed.textContent = formatTime(audioElement.currentTime);
+        timeDuration.textContent = formatTime(audioElement.duration);
     }
 
     function formatTime(sec) {
@@ -482,85 +560,257 @@ document.addEventListener('DOMContentLoaded', () => {
         return `${Math.floor(sec / 60)}:${(sec % 60).toString().padStart(2, '0')}`;
     }
 
-    // ================= UI UPDATES ==========================================
-    function updateEmotionUI(emotion) {
-        const preset = EMOTION_PRESETS[emotion];
-        if (!preset) return;
-        root.style.setProperty('--current', preset.color);
-        appTitle.style.color = preset.color;
-        appTitle.style.textShadow = `0 0 30px ${preset.color}`;
-        eegDot.style.background = preset.color;
-        eegStatus.style.color = preset.color;
-        intensityVal.textContent = preset.intensity + '%';
-        intensityFill.style.width = preset.intensity + '%';
-        animateBrainwaves(preset.waves);
-        document.querySelectorAll('.emotion-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.emotion === emotion);
-        });
-        flash.style.opacity = '0.08';
-        setTimeout(() => flash.style.opacity = '0', 150);
+    function hexToRgb(hex) {
+        return {
+            r: parseInt(hex.slice(1, 3), 16),
+            g: parseInt(hex.slice(3, 5), 16),
+            b: parseInt(hex.slice(5, 7), 16),
+        };
     }
 
-    function animateBrainwaves(waves) {
-        for (let band in waves) {
-            const cap = band.charAt(0).toUpperCase() + band.slice(1);
-            const valEl = document.getElementById('w' + cap);
-            const barEl = document.getElementById('w' + cap + 'Bar');
-            if (valEl) valEl.textContent = waves[band];
-            if (barEl) barEl.style.width = Math.min(waves[band], 100) + '%';
+    // ═══════════════════════════════════════════════════════════════════
+    //  VISUALIZER
+    // ═══════════════════════════════════════════════════════════════════
+    function setVisualizerMode(mode) {
+        currentVisMode = mode;
+        if (mode === 'bar') {
+            barCanvas.classList.add('active'); radialCanvas.classList.remove('active');
+            if (toggleBtn) toggleBtn.textContent = 'Switch to Radial View';
+            requestAnimationFrame(() => { resizeBarCanvas(); barCtx = barCanvas.getContext('2d'); });
+        } else {
+            barCanvas.classList.remove('active'); radialCanvas.classList.add('active');
+            if (toggleBtn) toggleBtn.textContent = 'Switch to Bar View';
+            resizeRadialCanvas(); radialCtx = radialCanvas.getContext('2d');
         }
     }
 
-    // ================= EMOTION GRID ========================================
-    function buildEmotionGrid() {
-        const emotions = ['calm', 'happy', 'angry', 'sad', 'focused'];
-        const emojiMap = { calm: '😌', happy: '😄', angry: '😤', sad: '😢', focused: '🧘' };
-        emotions.forEach(em => {
-            const btn = document.createElement('button');
-            btn.className = 'emotion-btn';
-            btn.dataset.emotion = em;
-            btn.style.setProperty('--e-color', EMOTION_PRESETS[em].color);
-            btn.innerHTML = `<span class="emoji">${emojiMap[em]}</span><span class="name">${em.charAt(0).toUpperCase() + em.slice(1)}</span>`;
-            btn.addEventListener('click', async () => {
-                if (songCache[em].length === 0) await fetchSongsForEmotion(em);
-                currentEmotion = em;
-                setCurrentSong(em);
-                playCurrentSong();
-                updateEmotionUI(em);
-            });
-            emotionGrid.appendChild(btn);
-        });
+    function resizeBarCanvas() {
+        if (!barCanvas) return;
+        const w = barCanvas.offsetWidth || barCanvas.parentElement.clientWidth;
+        if (w > 0) { barCanvas.width = w; barCanvas.height = 300; barCtx = barCanvas.getContext('2d'); }
     }
 
-    // ================= INITIALIZE ==========================================
+    function resizeRadialCanvas() {
+        if (!radialCanvas) return;
+        radialCanvas.width = 560; radialCanvas.height = 560;
+        radialCtx = radialCanvas.getContext('2d');
+    }
+
+    function drawCenteredBars(dataArray, width, height, ctx, colorRgb) {
+        const bufLen = dataArray.length;
+        const barWidth = width / (bufLen * 2);
+        const centerX = width / 2;
+        for (let i = 0; i < bufLen; i++) {
+            const value = dataArray[i] / 255;
+            const barHeight = Math.max(2, value * height * 0.7);
+            ctx.fillStyle = `rgba(${colorRgb.r},${colorRgb.g},${colorRgb.b},${0.5 + value * 0.5})`;
+            ctx.fillRect(centerX - (i + 1) * barWidth, height - barHeight, barWidth - 1, barHeight);
+            ctx.fillRect(centerX + i * barWidth, height - barHeight, barWidth - 1, barHeight);
+        }
+    }
+
+    function drawRadialSpectrum(dataArray, ctx, width, height, colorRgb) {
+        const cx = width / 2, cy = height / 2;
+        const maxR = Math.min(width, height) / 2 - 16;
+        const bufLen = dataArray.length;
+        const c = `${colorRgb.r},${colorRgb.g},${colorRgb.b}`;
+        const avgVal = dataArray.reduce((s, v) => s + v, 0) / bufLen / 255;
+        ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+        ctx.clearRect(0, 0, width, height);
+        ctx.save();
+        ctx.beginPath(); ctx.arc(cx, cy, maxR, 0, Math.PI * 2); ctx.clip();
+        ctx.fillStyle = 'rgba(6,6,16,1)'; ctx.fillRect(0, 0, width, height);
+        for (let l = 1; l < 7; l++) {
+            const t = l / 7, lat = (t - 0.5) * Math.PI, cosLat = Math.cos(lat);
+            const projY = cy + maxR * Math.sin(lat), projRx = maxR * cosLat, projRy = projRx * 0.18;
+            ctx.beginPath(); ctx.ellipse(cx, projY, projRx, projRy, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(${c},${0.06 + cosLat * 0.10})`; ctx.lineWidth = 0.75; ctx.stroke();
+        }
+        for (let l = 0; l < 8; l++) {
+            const angle = (l / 8) * Math.PI + globeRotation, cosA = Math.cos(angle);
+            ctx.beginPath(); ctx.ellipse(cx, cy, maxR * Math.abs(cosA), maxR, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(${c},${0.05 + Math.abs(cosA) * 0.13})`; ctx.lineWidth = 0.75; ctx.stroke();
+        }
+        ctx.beginPath(); ctx.ellipse(cx, cy, maxR, maxR * 0.18, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${c},0.22)`; ctx.lineWidth = 1; ctx.stroke();
+        const spikeCount = 128, half = spikeCount / 2;
+        const equatorRy = maxR * 0.32, baseR = maxR * 0.72, maxSpike = maxR * 0.22, breathAmp = maxR * 0.03;
+        const usedBins = Math.ceil(bufLen * 0.55);
+        for (let i = 0; i < spikeCount; i++) {
+            const halfIdx = i <= half ? i : spikeCount - i;
+            const dataIdx = Math.min(Math.floor((halfIdx / half) * usedBins), usedBins - 1);
+            const value = Math.pow(dataArray[dataIdx] / 255, 0.45);
+            const angle = (i / spikeCount) * Math.PI * 2 + globeRotation;
+            const cosA = Math.cos(angle), sinA = Math.sin(angle);
+            const depth3d = 0.4 + (cosA + 1) * 0.3;
+            const baseX = cx + baseR * cosA, baseY = cy + baseR * sinA * (equatorRy / maxR);
+            const nx = cosA, ny = sinA * (equatorRy / maxR);
+            const nLen = Math.sqrt(nx * nx + ny * ny) || 1;
+            const spikeLen = (0.08 + value * 0.92) * maxSpike * depth3d;
+            const tipX = baseX + (nx / nLen) * spikeLen, tipY = baseY + (ny / nLen) * spikeLen;
+            const waveOffset = (halfIdx / half) * Math.PI * 2 * 0.6;
+            const breathShift = Math.sin(spikePhase + waveOffset) * breathAmp;
+            ctx.beginPath(); ctx.moveTo(baseX, baseY + breathShift * 0.3); ctx.lineTo(tipX, tipY + breathShift);
+            ctx.lineWidth = (2.0 + value * 5.0) * depth3d;
+            ctx.strokeStyle = `rgba(${c},${0.65 + value * 0.35})`;
+            ctx.shadowColor = `rgb(${c})`; ctx.shadowBlur = value > 0.5 ? 10 : 4;
+            ctx.stroke(); ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+            if (value > 0.2) {
+                ctx.beginPath(); ctx.arc(tipX, tipY + breathShift, 1.5 + value * 2.5 * depth3d, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255,255,255,${value * depth3d * 0.95})`; ctx.fill();
+            }
+        }
+        const vigGrad = ctx.createRadialGradient(cx, cy, maxR * 0.45, cx, cy, maxR);
+        vigGrad.addColorStop(0, 'rgba(0,0,0,0)'); vigGrad.addColorStop(1, 'rgba(0,0,0,0.60)');
+        ctx.fillStyle = vigGrad; ctx.fillRect(0, 0, width, height);
+        const coreSize = maxR * (0.055 + avgVal * 0.075);
+        const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreSize);
+        coreGrad.addColorStop(0, `rgba(255,255,255,${0.45 + avgVal * 0.45})`);
+        coreGrad.addColorStop(0.5, `rgba(${c},${0.2 + avgVal * 0.25})`);
+        coreGrad.addColorStop(1, `rgba(${c},0)`);
+        ctx.fillStyle = coreGrad; ctx.beginPath(); ctx.arc(cx, cy, coreSize, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+        ctx.beginPath(); ctx.arc(cx, cy, maxR, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${c},0.55)`; ctx.lineWidth = 2.5;
+        ctx.shadowColor = `rgb(${c})`; ctx.shadowBlur = 20; ctx.stroke();
+        ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+        globeRotation += 0.007; if (globeRotation > Math.PI * 2) globeRotation -= Math.PI * 2;
+        spikePhase += 0.045; if (spikePhase > Math.PI * 200) spikePhase -= Math.PI * 200;
+    }
+
+    function getSimulatedData(length) {
+        const arr = new Uint8Array(length);
+        simPhase += 0.05;
+        for (let i = 0; i < length; i++)
+            arr[i] = Math.max(0, Math.min(255, 80 + 60 * Math.sin(simPhase + i * 0.3) + 50 * Math.sin(simPhase * 2.3 + i * 0.7)));
+        return arr;
+    }
+
+    function startVisualizerLoop() {
+        if (animationId) cancelAnimationFrame(animationId);
+        function animate() {
+            animationId = requestAnimationFrame(animate);
+            const rgb = hexToRgb(EMOTION_PRESETS[currentEmotion || 'calm'].color);
+            const data = analyser
+                ? (() => { const b = new Uint8Array(analyser.frequencyBinCount); analyser.getByteFrequencyData(b); return b; })()
+                : getSimulatedData(64);
+            if (currentVisMode === 'bar' && barCtx && barCanvas && barCanvas.width > 0) {
+                barCtx.clearRect(0, 0, barCanvas.width, barCanvas.height);
+                drawCenteredBars(data, barCanvas.width, barCanvas.height, barCtx, rgb);
+            } else if (currentVisMode === 'radial' && radialCtx && radialCanvas && radialCanvas.width > 0) {
+                drawRadialSpectrum(data, radialCtx, radialCanvas.width, radialCanvas.height, rgb);
+            }
+        }
+        animate();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  WEBSOCKET
+    // ═══════════════════════════════════════════════════════════════════
+    function handleWsMessage(data) {
+        if (!data || typeof data !== 'object') return;
+
+        if (data.type === 'status' && data.status === 'calibrating') {
+            const pct = Math.round((data.progress || 0) * 100);
+            showCalibBar(data.progress || 0);
+            if ((data.progress || 0) >= 1.0) {
+                hideCalibBar();
+                setConnectionState(
+                    'Calibration complete',
+                    'Baseline recorded. Analyzing your brainwaves…',
+                    'LIVE'
+                );
+            } else {
+                setConnectionState(
+                    'Calibrating baseline…',
+                    `EEG connected. Collecting your personal baseline… <strong>${pct}%</strong>`,
+                    'CALIBRATING'
+                );
+            }
+            return;
+        }
+
+        if (data.type === 'eeg_window') return;
+
+        if (data.type === 'emotion') {
+            hideCalibBar();
+            handleEmotionMessage(data);
+        }
+    }
+
+    function scheduleReconnect() {
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(() => { reconnectTimer = null; connectEmotionSocket(); }, WS_RECONNECT_DELAY_MS);
+    }
+
+    function connectEmotionSocket(force = false) {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (emotionSocket && (emotionSocket.readyState === WebSocket.OPEN || emotionSocket.readyState === WebSocket.CONNECTING)) {
+            if (!force) return;
+            emotionSocket.onclose = null; emotionSocket.close();
+            emotionSocket = null; socketConnected = false;
+        }
+        setConnectionState('Connecting…', 'Trying to connect to the live EEG stream…', 'CONNECTING');
+        hideCalibBar();
+        emotionSocket = new WebSocket(EEG_WS_URL);
+
+        emotionSocket.onopen = () => {
+            socketConnected = true;
+            setConnectionState('EEG stream connected', 'Live EEG connected. Waiting for calibration…', 'LIVE');
+        };
+        emotionSocket.onmessage = (event) => {
+            let data;
+            try { data = JSON.parse(event.data); } catch { return; }
+            handleWsMessage(data);
+        };
+        emotionSocket.onerror = () => {
+            if (!socketConnected)
+                setConnectionState('EEG unavailable',
+                    'Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below.',
+                    'SIMULATED');
+        };
+        emotionSocket.onclose = () => {
+            emotionSocket = null; socketConnected = false;
+            hideCalibBar();
+            setConnectionState('Disconnected',
+                'Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below.',
+                'SIMULATED');
+            scheduleReconnect();
+        };
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  INIT
+    // ═══════════════════════════════════════════════════════════════════
     async function init() {
         initAudio();
         buildEmotionGrid();
+        buildEegDataPanel();
+
+        setConnectionState(
+            'WebSocket not connected',
+            'Running in <span style="color:#ffd54f">simulation mode</span>. Click emotions below.',
+            'SIMULATED'
+        );
 
         playBtn.addEventListener('click', togglePlay);
         nextBtn.addEventListener('click', nextTrack);
         prevBtn.addEventListener('click', prevTrack);
         if (rewindBtn) rewindBtn.addEventListener('click', () => { if (audioElement) audioElement.currentTime -= 10; });
         if (forwardBtn) forwardBtn.addEventListener('click', () => { if (audioElement) audioElement.currentTime += 10; });
-        if (reconnectBtn) reconnectBtn.addEventListener('click', () => { wsStatusSpan.textContent = 'Reconnecting...'; });
-
-        if (toggleBtn) {
-            toggleBtn.addEventListener('click', () => {
-                setVisualizerMode(currentVisMode === 'bar' ? 'radial' : 'bar');
-            });
-        }
-
+        if (reconnectBtn) reconnectBtn.addEventListener('click', () => connectEmotionSocket(true));
+        if (toggleBtn) toggleBtn.addEventListener('click', () =>
+            setVisualizerMode(currentVisMode === 'bar' ? 'radial' : 'bar'));
         window.addEventListener('resize', () => {
-            if (currentVisMode === 'bar') resizeBarCanvas();
-            else resizeRadialCanvas();
+            if (currentVisMode === 'bar') resizeBarCanvas(); else resizeRadialCanvas();
         });
 
-        await Promise.all(Object.keys(songCache).map(em => fetchSongsForEmotion(em)));
-        setCurrentSong('calm');
-        updateEmotionUI('calm');
+        await Promise.all(SUPPORTED_EMOTIONS.map(em => fetchSongsForEmotion(em)));
 
+        updateEmotionColors('calm', null);
         setVisualizerMode('bar');
         startVisualizerLoop();
+        connectEmotionSocket();
     }
 
     init();

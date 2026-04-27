@@ -1,0 +1,24 @@
+{
+    "Markers": [
+    ],
+    "connectionType": "dongle",
+    "demographics": {
+        "birthday": null,
+        "countryOfInfluence": {
+            "iso": "",
+            "printable": ""
+        },
+        "countryOfResidence": {
+            "iso": "",
+            "printable": ""
+        },
+        "gender": "U"
+    },
+    "exportApp": "com.emotiv.emotivpro",
+    "exportTime": "2026-04-26T09:17:23.613+04:00",
+    "headsetType": "EPOCX",
+    "mappings": null,
+    "montageType": "UNKNOWN",
+    "recordId": "8bbb68d9-869f-472e-af7c-12d2101af1e1",
+    "user": "alumni_neuro"
+}
